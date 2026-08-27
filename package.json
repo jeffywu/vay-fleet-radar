@@ -1,0 +1,31 @@
+{
+  "name": "vay-fleet-radar",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @fleet-radar/web",
+    "dev": "npm run dev --workspace @fleet-radar/web",
+    "generate:world": "tsx tools/generate-world.ts",
+    "smoke:directions": "node --env-file=.env --import tsx tools/smoke-mapbox-directions.ts",
+    "smoke:web": "playwright test --config apps/web/playwright.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0",
+    "@testing-library/jest-dom": "^6.8.0",
+    "@testing-library/react": "^16.3.0",
+    "@types/geojson": "^7946.0.16",
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.1.12",
+    "@types/react-dom": "^19.1.9",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

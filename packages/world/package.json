@@ -1,0 +1,10 @@
+{
+  "name": "@fleet-radar/world",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./load": "./src/load.ts"
+  }
+}
+
