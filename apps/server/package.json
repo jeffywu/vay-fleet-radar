@@ -9,6 +9,7 @@
   "dependencies": {
     "@fleet-radar/dispatch": "*",
     "@fleet-radar/domain": "*",
-    "@fleet-radar/simulation": "*"
+    "@fleet-radar/simulation": "*",
+    "@fleet-radar/world": "*"
   }
 }

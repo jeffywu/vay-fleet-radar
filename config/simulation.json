@@ -1,0 +1,29 @@
+{
+  "seed": "vay-simulation-v1",
+  "vehicleCount": 100,
+  "tickIntervalMs": 1000,
+  "timeMultiplier": 1,
+  "maximumAdvanceMs": 5000,
+  "customerTripProbabilityPerSimulatedMinute": 0.025,
+  "minimumFreeDwellSeconds": 30,
+  "maximumRouteStartsPerTick": 2,
+  "maximumRouteStartsPerRealMinute": 120,
+  "maximumDestinationAttempts": 3,
+  "batteryCapacityKwh": 60,
+  "energyConsumptionKwhPerKm": 0.18,
+  "minimumMovementBatteryPercentage": 20,
+  "rechargeThresholdPercentage": 15,
+  "rechargeDelaySimulatedSeconds": 120,
+  "rechargeTargetPercentage": 85,
+  "telemetryGapProbabilityPerSimulatedMinute": 0.002,
+  "minimumTelemetryGapSeconds": 5,
+  "maximumTelemetryGapSeconds": 20,
+  "routing": {
+    "timeoutMs": 5000,
+    "maximumRetries": 1,
+    "maximumConcurrency": 4,
+    "requestsPerMinute": 240,
+    "maximumRequestsPerRun": 5000,
+    "endpointSnapToleranceMeters": 750
+  }
+}

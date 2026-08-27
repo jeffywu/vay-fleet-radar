@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./commands": "./src/commands/index.ts",
     "./events": "./src/events/index.ts"
   }
 }

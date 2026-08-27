@@ -104,7 +104,7 @@ Startup validation rejects invalid coordinates, duplicate IDs, missing zones, po
 
 ## Runtime Routing Flow
 
-Both the simulator's customer-trip logic and the dispatch engine depend on a transport-neutral port:
+The simulation package owns the transport-neutral port used by customer trips and dispatch-command execution:
 
 ```ts
 interface RoutingPort {
@@ -143,15 +143,15 @@ Customer-trip geometry is not displayed because the assignment only requires rou
 ### Dispatch assignment
 
 1. `RandomDispatchStrategy` selects an eligible `FREE` vehicle and a persisted destination.
-2. The dispatch engine asks `RoutingPort` for a route.
-3. The engine rejects the decision if routing fails or returned distance exceeds available range.
-4. It creates the dispatch job and sends an idempotent command containing the ephemeral plan.
-5. The simulator accepts the plan, transitions to `EN_ROUTE`, and emits the route lifecycle event.
-6. The same plan is exposed to the dashboard while active and discarded on completion or cancellation.
+2. The dispatch engine creates a job and sends an idempotent command containing only application IDs and the destination ID through `VehicleCommandPort`.
+3. The simulator resolves the destination and asks its `RoutingPort` for a route.
+4. The simulator rejects the command if routing fails or returned distance exceeds available range.
+5. On acceptance it retains the plan, transitions to `EN_ROUTE`, and emits the route lifecycle event.
+6. The plan is exposed to the dashboard while active and discarded on completion or cancellation. Dispatch never receives geometry or Mapbox types.
 
 ### Transient active-route store
 
-The server composition root owns an in-memory `ActiveRouteStore` keyed by the application route ID. It is working state, not a durable route cache.
+The simulation runtime owns an in-memory `ActiveRouteStore` keyed by the application route ID; the server composition root wires its reader to the API. It is working state, not a durable route cache.
 
 - It exists only for active `WITH_CUSTOMER` and `EN_ROUTE` movement.
 - It supplies geometry to the simulator and browser.
@@ -227,7 +227,7 @@ The simulator depends only on `RoutingPort` and `PlannedRoute`, not Mapbox types
 
 ### Dispatch engine
 
-The dispatch engine depends only on `RoutingPort`. Its strategy selects a vehicle and destination; the engine obtains and validates the ephemeral route before creating the command.
+The dispatch engine depends only on the domain-owned `VehicleCommandPort`. Its strategy selects a vehicle and destination; the simulator obtains and validates ephemeral geometry while executing the destination-only command.
 
 ### World catalog, database, and event log
 
@@ -257,7 +257,7 @@ The README should state that the base map and runtime route creation require int
 ## Verification
 
 - Unit-test destination validation and deterministic destination selection.
-- Unit-test the simulator and dispatch engine with a fake `RoutingPort` returning fixture geometry.
+- Unit-test the simulator with a fake `RoutingPort` returning fixture geometry, and unit-test dispatch with a fake `VehicleCommandPort` so it never observes routes.
 - Unit-test Mapbox response translation and error mapping with recorded hand-authored response shapes that contain no real persisted provider result.
 - Test rate limiting, request budgets, timeouts, retry classification, and token redaction.
 - Test that no Directions geometry or raw response is written to Postgres or the event log.

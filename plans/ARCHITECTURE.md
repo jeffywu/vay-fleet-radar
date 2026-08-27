@@ -39,11 +39,11 @@ flowchart LR
     C -->|append and project in one transaction| P[(Postgres)]
     P -->|current fleet and jobs| D[Dispatch engine]
     X[In-memory WorldCatalog] --> D
-    D -->|vehicle and destination| R[Routing port / Mapbox Directions]
-    R -->|ephemeral route| D
+    X --> S
+    D -->|vehicle and destination command| S
     S -->|customer trip request| R
     R -->|ephemeral route| S
-    D -->|assignment command with route| S
+    R[Routing port / Mapbox Directions]
     D -->|dispatch events| M
     P --> A[REST snapshot API]
     C --> E[SSE event stream]
@@ -147,7 +147,7 @@ On each tick it:
 4. Emits one telemetry event for each vehicle unless that vehicle is simulating a telemetry gap.
 5. Emits route lifecycle events when assignments change or complete.
 
-The simulator also implements a `VehicleCommandPort`. An assignment command contains a command ID, dispatch job ID, vehicle ID, application route ID, route version, destination ID, and ephemeral `PlannedRoute`. The simulator validates the vehicle's observed state and range at command time. It either retains the plan as active working state, starts movement, and emits `route.assigned`, or leaves the vehicle unchanged and emits `route.assignment-rejected`. This models the fact that a dispatch decision is a request to the vehicle domain rather than an immediate mutation of simulator internals.
+The simulator also implements the domain-owned `VehicleCommandPort`. An assignment command contains only application identifiers: command ID, dispatch job ID, vehicle ID, application route ID, route version, and destination ID. The simulator resolves the persisted destination and obtains the ephemeral route through its own `RoutingPort`, then validates vehicle state and range. It either retains the plan as active working state, starts movement, and emits `route.assigned`, or leaves the vehicle unchanged and emits `route.assignment-rejected`. Dispatch never receives Mapbox geometry or provider types.
 
 The valid MVP display-status transitions are:
 
@@ -159,7 +159,7 @@ The valid MVP display-status transitions are:
 
 The simulator never chooses `EN_ROUTE` independently; this status always has an accepted dispatch job and route assignment. The dispatch engine, not the simulator, is responsible for maintaining the target number of active assignments.
 
-Configuration is read from a small YAML or TOML file:
+Configuration is read from the runtime-validated `config/simulation.json` file:
 
 - Seed and number of vehicles.
 - Tick interval and simulated time multiplier.
@@ -188,7 +188,7 @@ The simulator interpolates position, heading, distance, and energy consumption a
 
 ### Runtime routing
 
-Both customer trips and dispatch assignments depend on a transport-neutral routing port:
+The simulation package owns the transport-neutral routing port used for both customer trips and dispatch-command execution:
 
 ```ts
 interface RoutingPort {
@@ -202,7 +202,7 @@ type PlannedRoute = {
 };
 ```
 
-The MVP adapter calls Mapbox Directions with the `mapbox/driving` profile, `geometries=geojson`, and an appropriate overview. `PlannedRoute` is active working state, not durable data. The composition root places it in an in-memory `ActiveRouteStore`, passes it to the simulator in the assignment command, and exposes it to the browser while that route is active. It is removed when the route completes or is cancelled.
+The MVP adapter calls Mapbox Directions with the `mapbox/driving` profile, `geometries=geojson`, and an appropriate overview. `PlannedRoute` is simulation-owned active working state, not command or durable data. The simulator installs it in an in-memory `ActiveRouteStore` after accepting a movement and the API may expose active dispatch geometry to the browser. It is removed when the route completes or is cancelled.
 
 Persisted route events and `route_current` keep only application-owned facts such as route ID, vehicle ID, origin coordinate or destination ID, destination ID, version, lifecycle state, and timestamps. They do not store Mapbox geometry, distance, duration, or the raw provider response. If active geometry is missing after a process restart, the adapter requests a new ephemeral route from the persisted endpoints.
 
@@ -241,9 +241,9 @@ interface VehicleCommandPort {
 }
 ```
 
-`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, destinations from the in-memory `WorldCatalog`, and configuration. `DispatchDecision` identifies a vehicle and destination and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for obtaining a route through `RoutingPort`, checking range, persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles.
+`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, destinations from the in-memory `WorldCatalog`, and configuration. `DispatchDecision` identifies a vehicle and destination and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for job persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. The simulator obtains and validates the route while handling the command. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles.
 
-The MVP uses `RandomDispatchStrategy`. On a configurable interval, the engine compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, and selects a different persisted destination inside the operating area. The engine asks `RoutingPort` for an ephemeral route, verifies range from the returned distance, creates a job, and sends the command. The random generator is seeded so the candidate decision is reproducible; live Mapbox geometry is not expected to be byte-for-byte deterministic. Routing or command rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle.
+The MVP uses `RandomDispatchStrategy`. On a configurable interval, the engine compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, and selects a different persisted destination inside the operating area. It creates a job and sends the destination-only command through `VehicleCommandPort`; the simulator obtains the route and checks range. The random generator is seeded so the decision is reproducible; live Mapbox geometry is not expected to be byte-for-byte deterministic. Command rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle.
 
 The job lifecycle is `REQUESTED -> ACCEPTED -> IN_PROGRESS -> COMPLETED`, with `REJECTED`, `CANCELLED`, and `FAILED` alternatives. Job state is distinct from vehicle display status. The strategy is selected by configuration from an explicit registry; dynamic plug-in loading or a generic rules framework is unnecessary for the MVP.
 
@@ -317,14 +317,14 @@ The TypeScript workspace is separated by responsibility:
 
 - `packages/domain`: shared event schemas, commands, identifiers, and transport-neutral types.
 - `packages/world`: validated, immutable bounded-world assets and the in-memory `WorldCatalog`.
-- `packages/simulation`: vehicle state model, simulator-owned event publisher, and the simulated implementation of `VehicleCommandPort`.
+- `packages/simulation`: vehicle state model, simulator-owned event publisher, runtime-routing port and Mapbox adapter, request controls, transient active-route store, and the simulated implementation of `VehicleCommandPort`.
 - `packages/dispatch`: dispatch engine, strategy contract, random MVP strategy, job rules, and its required ports.
-- `apps/server`: composition root, Mapbox Directions adapter, transient active-route store, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
+- `apps/server`: composition root, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
 - `apps/web`: React operator dashboard and the initial Mapbox world-preview spike.
 
 Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. Running them in one server process is an MVP deployment choice, not a domain coupling.
 
-Mapbox has two explicit integration points. Mapbox GL JS renders a Mapbox-hosted basemap plus application-owned GeoJSON sources for the operating polygon, service zones, destinations, vehicles, headings, and active routes. Separately, the server's `RoutingPort` adapter calls Mapbox Directions once per attempted movement and keeps the response only as active in-memory working state. The database never persists Directions results. See `plans/MAPBOX_INTEGRATION.md` for the complete inventory and fallback behavior.
+Mapbox has two explicit integration points. Mapbox GL JS renders a Mapbox-hosted basemap plus application-owned GeoJSON sources for the operating polygon, service zones, destinations, vehicles, headings, and active routes. Separately, the simulation package's server-side `RoutingPort` adapter calls Mapbox Directions once per attempted movement and keeps the response only as active in-memory working state. The database never persists Directions results. See `plans/MAPBOX_INTEGRATION.md` for the complete inventory and fallback behavior.
 
 Mapbox browser tokens are necessarily visible to the browser. Use a least-privilege public token, configure localhost/deployment URL restrictions where practical, and never expose a secret token. Use a separate least-privilege Directions token in the server environment and never send it to the browser. The current Mapbox Product Terms prohibit caching or storing Directions API results, so route geometry remains ephemeral and is discarded after use.
 
