@@ -15,7 +15,7 @@ Approximately 200 destinations are persisted because they define the stable oper
 
 - Use Mapbox GL JS v3 with one long-lived `Map` instance.
 - Use a Mapbox-hosted standard streets style as the basemap.
-- Persist the service-area polygon, service zones, and approximately 200 curated destination records.
+- Keep the service-area polygon, service zones, and approximately 200 curated destination records as source-controlled files loaded into memory.
 - Select an origin and destination locally, then make one Directions request per attempted trip or dispatch assignment.
 - Pass the ephemeral route geometry to the simulator and dashboard through application ports.
 - Do not write Mapbox route geometry, distance, duration, or raw responses to the event log, database, repository, or durable cache.
@@ -35,7 +35,7 @@ The public allowances are technically sufficient for a local interview prototype
 | Matrix API | 100,000 matrix elements/month | Many-to-many travel time and distance; no route geometry | Defer |
 | Optimization API | 100,000 requests/month | Reorders multiple stops for an efficient route | Defer |
 | Map Matching API | 100,000 requests/month | Snaps noisy traces to the road network | Defer |
-| Temporary Geocoding API | 100,000 requests/month | Address/place lookup | Do not use for persisted destinations |
+| Temporary Geocoding API | 100,000 requests/month | Address/place lookup | Do not use for source-controlled destinations |
 | Static Images API | 50,000 requests/month | Server-rendered map images | Not needed |
 
 A Mapbox GL JS map load is counted when a `Map` object is initialized. Pan, zoom, layer changes, and ordinary interaction do not create additional map loads, and the load includes the map's vector/raster tile requests. A session longer than 12 hours starts another map-load session. The dashboard should create one map and update its sources rather than recreate it during React renders.
@@ -61,7 +61,7 @@ The simulator persists telemetry positions calculated while following that geome
 
 If entitlement is uncertain or a reviewer must run without a Mapbox account, MapLibre GL JS with a suitably licensed tile source and an alternative routing provider is the fallback evaluation path.
 
-## Persisted Operating World
+## Source-Controlled Operating World
 
 The simulation must not generate arbitrary latitude/longitude destinations. Random coordinates may be off-road, across water, outside the service area, or impossible to route. The stable world consists of:
 
@@ -98,7 +98,7 @@ type Destination = {
 
 The list provides enough variety for customer trips and repositioning without creating coordinates dynamically. Each destination must be inside the service area, associated with a valid zone, and deliberately located on or near a routable road. Human-readable names can be fictional operational labels, so Mapbox Geocoding is unnecessary.
 
-Destination coordinates are durable application data. They must be authored by the project, obtained from a source whose license permits persistence, or obtained through a geocoding product and plan that explicitly permits permanent storage. Temporary Mapbox Geocoding results cannot be stored.
+Destination coordinates are durable source-controlled application data loaded into an in-memory `WorldCatalog`. They must be authored by the project, obtained from a source whose license permits persistence, or obtained through a geocoding product and plan that explicitly permits permanent storage. Temporary Mapbox Geocoding results cannot be stored.
 
 Startup validation rejects invalid coordinates, duplicate IDs, missing zones, points outside the operating polygon, and coordinates within a configured duplicate tolerance. Route failures are still possible as road data changes and are handled at request time.
 
@@ -229,9 +229,9 @@ The simulator depends only on `RoutingPort` and `PlannedRoute`, not Mapbox types
 
 The dispatch engine depends only on `RoutingPort`. Its strategy selects a vehicle and destination; the engine obtains and validates the ephemeral route before creating the command.
 
-### Database and event log
+### World catalog, database, and event log
 
-They persist destinations and route lifecycle facts, but no Directions response data. The backend joins active in-memory geometry into browser responses only when it is currently available.
+The `WorldCatalog` loads destinations and boundaries from canonical files at startup; they are not copied into Postgres. The database and event log persist route lifecycle facts but no Directions response data. The backend joins active in-memory geometry into browser responses only when it is currently available.
 
 ## Tokens and Secrets
 

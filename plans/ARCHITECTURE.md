@@ -41,7 +41,7 @@ flowchart LR
     M --> C
     C -->|append and project in one transaction| P[(Postgres)]
     P -->|current fleet and jobs| D[Dispatch engine]
-    X[(Destinations)] --> D
+    X[In-memory WorldCatalog] --> D
     D -->|vehicle and destination| R[Routing port / Mapbox Directions]
     R -->|ephemeral route| D
     S -->|customer trip request| R
@@ -166,6 +166,8 @@ A lightweight demo recharge rule restores low-battery vehicles after a simulated
 
 ### Bounded simulation world
 
+Implementation details for generating the Las Vegas metro assets are defined in `plans/BOUNDED_SIMULATION_WORLD_PLAN.md`.
+
 The simulation runs inside one explicitly configured operating area rather than choosing arbitrary coordinates. Its persistent world data consists of:
 
 - `service-area.geojson`: one WGS84 polygon defining valid simulation geography and the dashboard's initial and maximum map bounds.
@@ -233,7 +235,7 @@ interface VehicleCommandPort {
 }
 ```
 
-`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, persisted destinations, and configuration. `DispatchDecision` identifies a vehicle and destination and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for obtaining a route through `RoutingPort`, checking range, persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles or future engine instances.
+`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, destinations from the in-memory `WorldCatalog`, and configuration. `DispatchDecision` identifies a vehicle and destination and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for obtaining a route through `RoutingPort`, checking range, persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles or future engine instances.
 
 The MVP uses `RandomDispatchStrategy`. On a configurable interval, the engine compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, and selects a different persisted destination inside the operating area. The engine asks `RoutingPort` for an ephemeral route, verifies range from the returned distance, creates a job, and sends the command. The random generator is seeded so the candidate decision is reproducible; live Mapbox geometry is not expected to be byte-for-byte deterministic. Routing or command rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle.
 
@@ -252,10 +254,6 @@ The minimum tables are:
 ### `event_log`
 
 An append-only record of accepted events with `event_id`, event type, schema version, vehicle ID, sequence, occurred time, received time, and JSON payload. `event_id` is unique for idempotency. The event log is the replayable source of truth.
-
-### `destination`
-
-Approximately 200 stable destination records seeded from validated project data, including destination ID, display name, WGS84 coordinate, and service-zone ID. Destination coordinates are application-owned durable data and are not temporary geocoding results.
 
 ### `vehicle_current`
 
@@ -318,8 +316,8 @@ The TypeScript workspace is separated by responsibility:
 - `packages/domain`: shared event schemas, commands, identifiers, and transport-neutral types.
 - `packages/simulator`: vehicle state model and the simulated implementation of `VehicleCommandPort`.
 - `packages/dispatch`: dispatch engine, strategy contract, random MVP strategy, job rules, and its required ports.
-- `apps/server`: composition root, Mapbox Directions adapter, transient active-route store, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
-- `apps/web`: operator dashboard.
+- `apps/server`: composition root, immutable `WorldCatalog`, Mapbox Directions adapter, transient active-route store, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
+- `apps/web`: React operator dashboard and the initial Mapbox world-preview spike.
 
 Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. Running them in one server process is an MVP deployment choice, not a domain coupling. A future deployment can replace the in-process ports with Kafka and command-service adapters.
 
@@ -414,4 +412,4 @@ A later Kafka adapter should have at least one integration test against a real d
 
 ## Deliverables and Tradeoffs
 
-The repository must include backend and frontend code, the bounded operating area and approximately 200 persisted destinations, Docker-based local-run instructions, configuration examples, test instructions, and a concise README describing the 100-vehicle data, runtime routing, and dispatch flow. The README should state that Kafka, advanced rerouting, advanced dispatch optimization, historical analytics, and production deployment were deliberately deferred to keep the implementation complete and reviewable within the timebox.
+The repository must include backend and frontend code, the bounded operating area and approximately 200 source-controlled destinations loaded in memory, Docker-based local-run instructions, configuration examples, test instructions, and a concise README describing the 100-vehicle data, runtime routing, and dispatch flow. The README should state that Kafka, advanced rerouting, advanced dispatch optimization, historical analytics, and production deployment were deliberately deferred to keep the implementation complete and reviewable within the timebox.
