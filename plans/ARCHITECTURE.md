@@ -1,6 +1,6 @@
 # Fleet Radar Architecture
 
-This project is a take-home exercise for Vay, a remote-driving company. The objective is to build a small, operator-focused Fleet Radar while demonstrating full-stack delivery, event-driven thinking, real-time state handling, and pragmatic architectural choices. See `plans/ASSIGNMENT.md` for the original requirements.
+This project is a take-home exercise for Vay, a remote-driving company. The objective is to build a small, operator-focused Fleet Radar while demonstrating full-stack delivery, event-driven thinking, real-time state handling, and pragmatic architectural choices. See `plans/ASSIGNMENT.md` for the original requirements and `plans/MAPBOX_INTEGRATION.md` for the Mapbox dependency, free-tier limits, and integration boundary.
 
 The implementation is deliberately a narrow end-to-end slice that can be completed and explained within the assignment timebox. A lightweight dispatch engine is part of that slice because dispatch is a real operational-system responsibility, not simulator behavior. Charging, incidents, demand forecasting, and advanced dispatch policies remain extension points rather than partially implemented subsystems.
 
@@ -11,6 +11,7 @@ The implementation is deliberately a narrow end-to-end slice that can be complet
 - Simulate approximately 100 vehicles, including approximately 10 simultaneously in `EN_ROUTE` status.
 - Display every vehicle's location, heading, battery percentage, required status, and data freshness.
 - Display the current route for vehicles in `EN_ROUTE` status.
+- Persist a bounded operating area and approximately 200 curated destinations, while retrieving route geometry ephemerally through Mapbox Directions.
 - Update the dashboard as telemetry and route events arrive.
 - Give an operator a clear map, fleet table, filters, legend, low-battery signal, and stale-data signal.
 - Treat immutable telemetry and route events as the source of truth and maintain queryable current-state projections.
@@ -31,7 +32,7 @@ These non-goals remain useful discussion topics and are covered under Future Wor
 
 ## System Context and Data Flow
 
-The map area, service zones, destinations, and route geometries are static development assets. Precomputed GeoJSON routes keep the demo deterministic and avoid making runtime routing API calls. The simulator and event-source adapter represent the external vehicle/Kafka environment. Dispatch, event consumption, projections, APIs, and the dashboard are operational-system responsibilities.
+The operating area, service zones, and approximately 200 curated destinations are persisted, repository-owned world data. Route geometry is deliberately not persisted: customer trips and dispatch assignments request an ephemeral route from Mapbox Directions at runtime. The simulator and event-source adapter represent the external vehicle/Kafka environment. Dispatch, event consumption, projections, APIs, and the dashboard are operational-system responsibilities.
 
 ```mermaid
 flowchart LR
@@ -40,8 +41,12 @@ flowchart LR
     M --> C
     C -->|append and project in one transaction| P[(Postgres)]
     P -->|current fleet and jobs| D[Dispatch engine]
-    R[Route catalog] --> D
-    D -->|assignment command| S
+    X[(Destinations)] --> D
+    D -->|vehicle and destination| R[Routing port / Mapbox Directions]
+    R -->|ephemeral route| D
+    S -->|customer trip request| R
+    R -->|ephemeral route| S
+    D -->|assignment command with route| S
     D -->|dispatch events| M
     P --> A[REST snapshot API]
     C --> E[SSE event stream]
@@ -102,7 +107,7 @@ type FleetEvent<TType extends string = string, TPayload = unknown> = {
 MVP event types are:
 
 - `vehicle.telemetry-received`: location, heading, battery percentage, and display status.
-- `route.assigned`: route ID, version, destination, and GeoJSON `LineString`.
+- `route.assigned`: application route ID, version, destination ID, and assignment state. Provider route geometry is transient and is not written to the event log.
 - `route.updated`: a newer version of an active route.
 - `route.cancelled`: the active route is no longer valid.
 - `route.completed`: the vehicle has completed the route.
@@ -110,7 +115,7 @@ MVP event types are:
 - `dispatch.assignment-requested`: the dispatcher selected a vehicle and route.
 - `dispatch.assignment-completed`: the correlated route completed.
 
-Route geometry is not repeated in telemetry events. Route events and telemetry have independent timestamps and versions so the UI can distinguish stale vehicle data from stale route data.
+Route geometry is not repeated in telemetry events or persisted route events. It remains transient working state for the active movement and is discarded on completion. Route events and telemetry have independent timestamps and versions so the UI can distinguish stale vehicle data from stale route data.
 
 ### Data semantics
 
@@ -136,7 +141,7 @@ On each tick it:
 4. Emits one telemetry event for each vehicle unless that vehicle is simulating a telemetry gap.
 5. Emits route lifecycle events when assignments change or complete.
 
-The simulator also implements a `VehicleCommandPort`. An assignment command contains a command ID, dispatch job ID, vehicle ID, route ID, and route version. The simulator validates the vehicle's observed state and range at command time. It either starts movement and emits `route.assigned`, or leaves the vehicle unchanged and emits `route.assignment-rejected`. This models the fact that a dispatch decision is a request to the vehicle domain rather than an immediate mutation of simulator internals.
+The simulator also implements a `VehicleCommandPort`. An assignment command contains a command ID, dispatch job ID, vehicle ID, application route ID, route version, destination ID, and ephemeral `PlannedRoute`. The simulator validates the vehicle's observed state and range at command time. It either retains the plan as active working state, starts movement, and emits `route.assigned`, or leaves the vehicle unchanged and emits `route.assignment-rejected`. This models the fact that a dispatch decision is a request to the vehicle domain rather than an immediate mutation of simulator internals.
 
 The valid MVP display-status transitions are:
 
@@ -155,9 +160,45 @@ Configuration is read from a small YAML or TOML file:
 - Customer-trip probability and free-time range.
 - Battery capacity, energy consumption per distance, and low-battery threshold.
 - Telemetry-gap probability and maximum gap duration.
-- Service-area and route-asset locations.
+- Service-area, service-zone, and destination-data locations.
 
 A lightweight demo recharge rule restores low-battery vehicles after a simulated delay so the fleet does not eventually become inert. Charging locations, queues, and operator workflows remain future work.
+
+### Bounded simulation world
+
+The simulation runs inside one explicitly configured operating area rather than choosing arbitrary coordinates. Its persistent world data consists of:
+
+- `service-area.geojson`: one WGS84 polygon defining valid simulation geography and the dashboard's initial and maximum map bounds.
+- `service-zones.geojson`: named operational subdivisions used for coverage and filtering.
+- `destinations.json`: approximately 200 curated stable destination IDs, display names, coordinates, and service-zone IDs. Coordinates must be inside the operating polygon and deliberately located on or near routable roads.
+
+Vehicles initialize at destination coordinates. A `FREE` vehicle remains associated with its current destination. Customer trips and dispatch assignments choose another persisted destination and request a runtime route through `RoutingPort`. When a vehicle reaches the route endpoint, its current destination becomes the selected destination.
+
+Two destinations per vehicle provide enough spatial variety that repositioning and customer trips do not repeatedly cycle through a tiny set of points. Startup validation fails with a clear error if destination data is invalid, a destination references a missing service zone, coordinates are duplicated beyond a configured tolerance, or a destination is outside the operating polygon. Destination data must be authored by the project or obtained from a source whose license permits persistence; temporary Mapbox Geocoding results may not be stored.
+
+The simulator interpolates position, heading, distance, and energy consumption along the ephemeral `LineString` returned for an accepted trip. If Directions returns `NoRoute`, `NoSegment`, times out, or is rate-limited, the transition is rejected and the vehicle remains `FREE`; a bounded retry may select another destination. The simulator never invents an arbitrary coordinate or falls back to a straight line that contradicts the displayed route.
+
+### Runtime routing
+
+Both customer trips and dispatch assignments depend on a transport-neutral routing port:
+
+```ts
+interface RoutingPort {
+  planRoute(origin: Position, destination: Destination): Promise<PlannedRoute>;
+}
+
+type PlannedRoute = {
+  geometry: GeoJSON.LineString;
+  distanceMeters: number;
+  durationSeconds: number;
+};
+```
+
+The MVP adapter calls Mapbox Directions with the `mapbox/driving` profile, `geometries=geojson`, and an appropriate overview. `PlannedRoute` is active working state, not durable data. The composition root places it in an in-memory `ActiveRouteStore`, passes it to the simulator in the assignment command, and exposes it to the browser while that route is active. It is removed when the route completes or is cancelled.
+
+Persisted route events and `route_current` keep only application-owned facts such as route ID, vehicle ID, origin coordinate or destination ID, destination ID, version, lifecycle state, and timestamps. They do not store Mapbox geometry, distance, duration, or the raw provider response. If active geometry is missing after a process restart, the adapter requests a new ephemeral route from the persisted endpoints.
+
+Directions is called once per attempted trip or dispatch assignment, never once per telemetry tick. The adapter enforces a concurrency limit, a request timeout, bounded retries, the provider's rate limit, and an application-level monthly request budget. Accelerating simulated movement must not accelerate trip turnover past that request budget. Tests use a deterministic fake `RoutingPort`, not live Mapbox requests.
 
 ## Dispatch Engine
 
@@ -192,9 +233,9 @@ interface VehicleCommandPort {
 }
 ```
 
-`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, available routes, and configuration. `DispatchDecision` identifies a vehicle and route and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for invariants, persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles or future engine instances.
+`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, persisted destinations, and configuration. `DispatchDecision` identifies a vehicle and destination and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for obtaining a route through `RoutingPort`, checking range, persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles or future engine instances.
 
-The MVP uses `RandomDispatchStrategy`. On a configurable interval, the engine compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, chooses a reachable route, creates a job, and sends the command. The random generator is seeded so behavior is reproducible. Rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle.
+The MVP uses `RandomDispatchStrategy`. On a configurable interval, the engine compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, and selects a different persisted destination inside the operating area. The engine asks `RoutingPort` for an ephemeral route, verifies range from the returned distance, creates a job, and sends the command. The random generator is seeded so the candidate decision is reproducible; live Mapbox geometry is not expected to be byte-for-byte deterministic. Routing or command rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle.
 
 The job lifecycle is `REQUESTED -> ACCEPTED -> IN_PROGRESS -> COMPLETED`, with `REJECTED`, `CANCELLED`, and `FAILED` alternatives. Job state is distinct from vehicle display status. The strategy is selected by configuration from an explicit registry; dynamic plug-in loading or a generic rules framework is unnecessary for the MVP.
 
@@ -204,7 +245,7 @@ MVP dispatch configuration includes the strategy name, target active assignments
 
 ## Data Backend
 
-Postgres is the durable store. PostGIS is included only if the MVP implements zone membership or proximity queries; displaying points and precomputed routes alone does not require it.
+Postgres is the durable store. PostGIS is included only if the MVP implements zone membership or proximity queries; displaying points and ephemeral routes alone does not require it.
 
 The minimum tables are:
 
@@ -212,13 +253,17 @@ The minimum tables are:
 
 An append-only record of accepted events with `event_id`, event type, schema version, vehicle ID, sequence, occurred time, received time, and JSON payload. `event_id` is unique for idempotency. The event log is the replayable source of truth.
 
+### `destination`
+
+Approximately 200 stable destination records seeded from validated project data, including destination ID, display name, WGS84 coordinate, and service-zone ID. Destination coordinates are application-owned durable data and are not temporary geocoding results.
+
 ### `vehicle_current`
 
 One current row per vehicle containing location, heading, battery, display status, last sequence, last occurred time, and last received time. An event only updates this projection when its sequence is newer than the stored sequence.
 
 ### `route_current`
 
-At most one active route per vehicle, including route ID, version, destination, geometry, lifecycle state, and update time. A route update only applies when its version is newer than the stored version.
+At most one active route record per vehicle, including application route ID, version, origin coordinate or destination ID, destination ID, lifecycle state, and update time. Mapbox geometry, distance, duration, and raw responses are not persisted. A route update only applies when its version is newer than the stored version.
 
 ### `dispatch_job`
 
@@ -233,7 +278,7 @@ Database views are reserved for stable domain calculations such as zone coverage
 Minimum endpoints are:
 
 - `GET /api/vehicles`: current vehicle snapshot, with active route summaries where applicable.
-- `GET /api/vehicles/:vehicleId`: vehicle details and active route geometry.
+- `GET /api/vehicles/:vehicleId`: vehicle details plus active ephemeral route geometry when available.
 - `GET /api/dispatch-jobs`: active and recent dispatch jobs.
 - `GET /api/events`: SSE stream of accepted vehicle, route, and dispatch projection updates.
 - `GET /health`: application and database readiness.
@@ -263,22 +308,24 @@ Operator mutation controls such as customer support, manually creating, removing
 
 - TypeScript for simulator, backend, shared event schemas, and frontend.
 - A lightweight Node HTTP framework and schema validation library; framework selection should favor delivery speed and readable code.
-- React with Mapbox GL JS for the dashboard.
+- React with Mapbox GL JS for basemap rendering, camera controls, and client-side GeoJSON layers in the dashboard.
 - Postgres, optionally with PostGIS when spatial queries are implemented.
 - Dockerfiles for application services and Docker Compose for reproducible local orchestration.
-- Environment variables for database credentials and the Mapbox public token; `.env.example` contains names and safe placeholders only.
+- Environment variables for database credentials, the Mapbox browser token, the server-side Directions token, and the Directions request budget; `.env.example` contains names and safe placeholders only.
 
 The TypeScript workspace is separated by responsibility:
 
 - `packages/domain`: shared event schemas, commands, identifiers, and transport-neutral types.
 - `packages/simulator`: vehicle state model and the simulated implementation of `VehicleCommandPort`.
 - `packages/dispatch`: dispatch engine, strategy contract, random MVP strategy, job rules, and its required ports.
-- `apps/server`: composition root, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
+- `apps/server`: composition root, Mapbox Directions adapter, transient active-route store, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
 - `apps/web`: operator dashboard.
 
 Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. Running them in one server process is an MVP deployment choice, not a domain coupling. A future deployment can replace the in-process ports with Kafka and command-service adapters.
 
-Mapbox browser tokens are necessarily visible to the browser. Use a least-privilege public token, configure localhost/deployment URL restrictions where practical, and never expose a secret token. Precomputed route assets avoid requiring a Directions API credential during the demo.
+Mapbox has two explicit integration points. Mapbox GL JS renders a Mapbox-hosted basemap plus application-owned GeoJSON sources for the operating polygon, service zones, destinations, vehicles, headings, active routes, and optional clusters. Separately, the server's `RoutingPort` adapter calls Mapbox Directions once per attempted movement and keeps the response only as active in-memory working state. The database never persists Directions results. See `plans/MAPBOX_INTEGRATION.md` for the complete inventory and fallback behavior.
+
+Mapbox browser tokens are necessarily visible to the browser. Use a least-privilege public token, configure localhost/deployment URL restrictions where practical, and never expose a secret token. Use a separate least-privilege Directions token in the server environment and never send it to the browser. The current Mapbox Product Terms prohibit caching or storing Directions API results, so route geometry remains ephemeral and is discarded after use.
 
 Docker Compose is the local runtime contract. Railway does not execute a Compose application as one production unit; each Compose service maps to a Railway service and Postgres should use Railway's managed database. Railway deployment is optional future documentation, not an MVP requirement.
 
@@ -320,6 +367,7 @@ At one telemetry update per second, 1,000 vehicles produce approximately 1,000 e
 - Keep reads on compact, role-oriented projections rather than scanning history.
 - Coalesce SSE and browser updates to a useful visual cadence and use Mapbox layers rather than DOM markers.
 - Build zone, alert, workload, and dispatch-queue projections that match operator workflows.
+- Treat routing as a capacity and cost dependency: enforce request budgets, measure route-start rate, and plan a commercial allowance or provider strategy when free-tier limits no longer match fleet turnover.
 - Apply retention or archival policies to the event log independently of current projections.
 - Measure consumer lag, projection age, invalid events, command acknowledgement, dispatch decision latency, database latency, and connected clients.
 
@@ -331,6 +379,10 @@ Tests should cover both happy paths and edge conditions:
 
 - Valid and invalid simulator transitions.
 - Deterministic movement, heading, battery depletion, and demo recharge.
+- Validation and persistence of approximately 200 bounded destinations.
+- Deterministic destination selection with a fake `RoutingPort`.
+- Directions timeout, rate-limit, no-route, budget-exhaustion, and provider-degraded behavior.
+- Proof that provider geometry, distance, duration, and raw responses never enter the database or event log.
 - Required `EN_ROUTE` count and associated route presence.
 - Deterministic random-strategy decisions and strategy selection by configuration.
 - Dispatch eligibility, one-active-job-per-vehicle, target concurrency, command rejection, and retry on a later cycle.
@@ -351,6 +403,7 @@ A later Kafka adapter should have at least one integration test against a real d
 - Real Kafka ingestion, schema registry, consumer lag monitoring, dead-letter handling, and replay tooling.
 - Multidimensional vehicle state covering occupancy, control mode, service availability, energy, connectivity, and incidents.
 - Charging stations, charge queues, range-aware dispatch, and energy-cost optimization.
+- Traffic-aware routing, mid-route rerouting, alternative routes, and provider failover beyond the MVP's initial ephemeral route request.
 - Teledriver scheduling, advanced command retries and cancellation, strategy experimentation, and operator audit workflows.
 - Customer-support and field-agent incident workflows.
 - Demand forecasting and demand-weighted coverage using H3 or another spatial index.
@@ -361,4 +414,4 @@ A later Kafka adapter should have at least one integration test against a real d
 
 ## Deliverables and Tradeoffs
 
-The repository must include backend and frontend code, Docker-based local-run instructions, configuration examples, test instructions, and a concise README describing the 100-vehicle data and dispatch flow. The README should state that Kafka, advanced dispatch optimization, historical analytics, and production deployment were deliberately deferred to keep the implementation complete and reviewable within the timebox.
+The repository must include backend and frontend code, the bounded operating area and approximately 200 persisted destinations, Docker-based local-run instructions, configuration examples, test instructions, and a concise README describing the 100-vehicle data, runtime routing, and dispatch flow. The README should state that Kafka, advanced rerouting, advanced dispatch optimization, historical analytics, and production deployment were deliberately deferred to keep the implementation complete and reviewable within the timebox.
