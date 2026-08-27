@@ -1,56 +1,27 @@
-import { useCallback, useState } from "react";
-import type { Destination } from "@fleet-radar/world";
+import { FleetConnection } from "./components/FleetConnection.tsx";
 import { FleetMap } from "./components/FleetMap.tsx";
+import { useFleetFeed } from "./hooks/useFleetFeed.ts";
 
 export function App() {
-  const [selected, setSelected] = useState<Destination>();
-  const [summary, setSummary] = useState({ destinations: 0, zones: 0 });
-  const handleSelect = useCallback((destination: Destination) => setSelected(destination), []);
-  const handleWorldLoad = useCallback((counts: typeof summary) => setSummary(counts), []);
-
-  return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <span className="eyebrow">Operations</span>
-          <h1>Fleet Radar</h1>
-        </div>
-        <span className="preview-badge"><i />World preview</span>
-      </header>
-      <div className="workspace">
-        <aside className="sidebar">
-          <section>
-            <p className="section-label">Simulation world</p>
-            <div className="metrics">
-              <article><strong>{summary.destinations || "—"}</strong><span>Destinations</span></article>
-              <article><strong>{summary.zones || "—"}</strong><span>Service zones</span></article>
-            </div>
-          </section>
-          <section className="selection" aria-live="polite">
-            <p className="section-label">Selected destination</p>
-            {selected ? (
-              <div>
-                <strong>{selected.name}</strong>
-                <code>{selected.id}</code>
-                <span>{selected.serviceZoneId}</span>
-                <small>{selected.coordinate[1].toFixed(5)}, {selected.coordinate[0].toFixed(5)}</small>
-              </div>
-            ) : <p>Choose an orange point on the map to inspect its world data.</p>}
-          </section>
-          <section className="checklist">
-            <p className="section-label">Visual QA</p>
-            <ul>
-              <li>Nine zones tile the boundary</li>
-              <li>Points cluster around the metro</li>
-              <li>No destination falls outside</li>
-              <li>Selection matches ID and zone</li>
-            </ul>
-          </section>
-          <footer><span className="status-dot" />Static world data · Las Vegas</footer>
-        </aside>
-        <FleetMap onDestinationSelect={handleSelect} onWorldLoad={handleWorldLoad} />
-      </div>
-    </main>
-  );
+  const fleet = useFleetFeed();
+  return <main className="app-shell">
+    <header className="topbar">
+      <div><span className="eyebrow">Operations</span><h1>Fleet Radar</h1></div>
+      <FleetConnection state={fleet.connectionState} count={fleet.vehicles.length} errorMessage={fleet.errorMessage} onRetry={fleet.retry} />
+    </header>
+    <div className="workspace">
+      <aside className="sidebar">
+        <section><p className="section-label">Vehicle status</p><div className="status-legend" aria-label="Vehicle status legend">
+          <span><i className="vehicle-key vehicle-key--free" />Free</span>
+          <span><i className="vehicle-key vehicle-key--customer" />With customer</span>
+          <span><i className="vehicle-key vehicle-key--route" />En route</span>
+          <span><i className="vehicle-key vehicle-key--stale" />Stale telemetry</span>
+        </div></section>
+        <section className="map-context"><p className="section-label">Map context</p>
+          <p>Las Vegas service area and operating zones. Vehicle arrows point in their current heading.</p></section>
+        <footer>Committed telemetry · Real-time feed</footer>
+      </aside>
+      <FleetMap vehicles={fleet.vehicles} staleAfterSeconds={fleet.staleAfterSeconds} />
+    </div>
+  </main>;
 }
-

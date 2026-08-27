@@ -291,7 +291,9 @@ Minimum endpoints are:
 - `GET /api/events`: SSE stream of accepted vehicle, route, and dispatch projection updates.
 - `GET /health`: application and database readiness.
 
-SSE messages come from committed `projection_update` records, include a resumable stream ID, and contain only the changed projection. The backend may coalesce updates over a short interval if the simulator runs faster than the browser should render. The browser applies updates to an indexed client-side collection and updates Mapbox data in batches rather than rendering one React/DOM marker per vehicle.
+SSE messages come from committed `projection_update` records, include a resumable stream ID, and contain only the changed projection. The implemented browser feed loads `GET /api/vehicles` first, indexes its complete replacement records by vehicle ID, and opens the named SSE stream after the snapshot's opaque cursor. Native `Last-Event-ID` reconnection handles ordinary interruptions; `stream.reset-required` closes the old connection and atomically installs a new snapshot before reconnecting. Malformed individual stream records are ignored without discarding the last known fleet.
+
+Browser replacements are flushed to React at most once per animation frame and stale state is recalculated once per second from backend receipt time. One Mapbox GeoJSON source and two layers render all vehicle locations, status colors, stale treatment, and headings. This avoids one DOM marker or one source update per telemetry event and remains suitable for the expected increase from approximately 100 to 1,000 vehicles.
 
 The API joins route geometry only from the simulation-owned `ActiveRouteReader` in process memory. No REST or SSE repository reads geometry from Postgres, and missing geometry after a restart is an expected transient state until routing reacquires it.
 
@@ -299,18 +301,9 @@ There are no public mutation endpoints in the MVP.
 
 ## Operator Dashboard
 
-The MVP is one coherent operator view rather than separate operational and business dashboards:
+The implemented integration spike is one map-first operator view. It displays the Las Vegas service area and zones, all current vehicles in one GeoJSON source, vehicle heading, status color, stale treatment, fleet count, and explicit Starting, Live, Reconnecting, Resetting, and Error feed states. Backend feed operation is independent from Mapbox readiness, so a missing public token or basemap failure does not stop snapshot/SSE observation or hide the fleet count.
 
-- Mapbox map with vehicle symbols, heading, status color, and stale styling.
-- Route overlay for the selected `EN_ROUTE` vehicle, with a toggle for all active routes.
-- Fleet table with vehicle ID, status, battery, freshness, and destination.
-- Search and filters for status, low battery, and stale telemetry.
-- Selected-vehicle detail panel with exact timestamps and route information.
-- Legend and KPI strip for `FREE`, `WITH_CUSTOMER`, `EN_ROUTE`, low-battery, and stale counts.
-- Compact dispatch queue showing requested, active, rejected, and recently completed jobs.
-- Predefined service-zone overlay showing `FREE` vehicle count versus a configurable target.
-
-Staleness must be conspicuous and must not silently present an old location as live. Coverage is calculated over named operational zones rather than arbitrary empty map cells.
+The next dashboard capabilities are deliberately incremental future work: selected-vehicle detail, active-route overlays, a fleet table, status/battery/stale filters, dispatch-job visibility, and zone coverage. Staleness will remain conspicuous, and future coverage calculations will use named operational zones rather than arbitrary empty map cells.
 
 ## Infrastructure
 
@@ -329,7 +322,7 @@ The TypeScript workspace is separated by responsibility:
 - `packages/simulation`: vehicle state model, simulator-owned event publisher, runtime-routing port and Mapbox adapter, request controls, transient active-route store, and the simulated implementation of `VehicleCommandPort`.
 - `packages/dispatch`: dispatch engine, strategy contract, random MVP strategy, job rules, and its required ports.
 - `apps/server`: composition root, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
-- `apps/web`: React operator dashboard and the initial Mapbox world-preview spike.
+- `apps/web`: React map-first operator view, snapshot/SSE fleet feed, and batched Mapbox vehicle rendering.
 
 Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. The local deployment uses one application container containing the server, simulation and dispatch runtimes, and built React assets, plus one Postgres container; these package boundaries remain valid despite the single-process MVP topology.
 
@@ -360,7 +353,8 @@ Tests should cover both happy paths and edge conditions:
 - Projection rebuild from the event log.
 - Telemetry staleness after a simulated gap.
 - REST snapshot and SSE update integration.
-- A frontend smoke test for selection, filtering, and route display.
+- Browser-owned snapshot parsing, cursor handoff, named SSE replacement, reconnect/reset behavior, cleanup, and batched fleet updates.
+- Mapbox source/layer lifecycle plus an opt-in live fleet-map smoke test.
 
 ## Deliverables and Tradeoffs
 

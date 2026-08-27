@@ -42,8 +42,15 @@ suite("backend API", () => {
     const list = await app.inject({ method: "GET", url: "/api/vehicles" });
     expect(list.statusCode).toBe(200);
     expect(list.headers["x-request-id"]).toMatch(/^[A-Za-z0-9._-]{1,64}$/);
-    expect(list.json()).toMatchObject({ data: [{ vehicleId: "vehicle-0001", isStale: false, activeRoute: { geometryAvailable: false } }], meta: { count: 1, streamCursor: "2" } });
-    expect(JSON.stringify(list.json())).not.toContain("coordinates");
+    const snapshot = list.json();
+    expect(snapshot).toMatchObject({ data: [{ vehicleId: "vehicle-0001", isStale: false, activeRoute: { geometryAvailable: false } }],
+      meta: { count: 1, generatedAt: "2026-01-01T00:00:10.000Z", streamCursor: "2", staleAfterSeconds: 10 } });
+    expect(JSON.stringify(snapshot)).not.toContain("coordinates");
+    const { isStale: _isStale, activeRoute: _activeRoute, ...mapRecord } = snapshot.data[0];
+    const streamed = await pool.query<{ payload: unknown }>(
+      "SELECT payload FROM projection_update WHERE update_type='vehicle.updated' ORDER BY stream_id DESC LIMIT 1",
+    );
+    expect(streamed.rows[0]?.payload).toEqual(mapRecord);
     const detail = await app.inject({ method: "GET", url: "/api/vehicles/vehicle-0001" });
     expect(detail.json().data.activeRoute).toMatchObject({ geometryAvailable: true, geometry: { type: "LineString" } });
     expect((await app.inject({ method: "GET", url: "/api/vehicles/%20" })).statusCode).toBe(400);
@@ -63,7 +70,7 @@ suite("backend API", () => {
         payload: { coordinate: [-115.17, 36.12], heading: 90, batteryPercentage: 75, status: "FREE" } });
     }
     await pool.query("DELETE FROM projection_update WHERE stream_id=1");
-    const response = await app.inject({ method: "GET", url: "/api/events?after=0" });
+    const response = await app.inject({ method: "GET", url: "/api/events?after=2", headers: { "last-event-id": "0" } });
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("event: stream.reset-required");
   });

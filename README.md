@@ -11,9 +11,11 @@ cp .env.example .env
 docker compose up --build --wait
 ```
 
-Open <http://localhost:3000>. `docker compose logs -f app` follows application logs, and `docker compose down` stops the stack without deleting fleet data.
+Open <http://localhost:3000>. The server starts one simulation automatically; no browser action is required. The map progresses from Starting to Live and should populate to approximately 100 vehicles as committed telemetry reaches the REST snapshot and SSE feed. `docker compose logs -f app` follows application logs, and `docker compose down` stops the stack without deleting fleet data.
 
 Mapbox is optional for startup. Set `VITE_MAPBOX_ACCESS_TOKEN` to a public `pk.*` token for the browser map and `MAPBOX_DIRECTIONS_ACCESS_TOKEN` to a server-only token for live routing. The backend remains available in degraded-routing mode when the server token is absent. Never put a secret token in `VITE_MAPBOX_ACCESS_TOKEN`, a Docker build argument, source control, logs, or browser code.
+
+The map header reports Starting while the initial snapshot and stream connect, Live after SSE opens, Reconnecting during an interruption, Resetting while recovering from a pruned cursor, and Error after bounded snapshot retries. Reconnecting preserves the last known locations and ages them into stale styling. Mapbox route overlays, vehicle details, filters, tables, and dispatch controls are intentionally deferred to the next interactive UI increments.
 
 For compatibility with the initial local spike, a root `MAPBOX_TOKEN` is also accepted by host-run development. The browser build still rejects it unless it is a public `pk.*` token. Prefer the two explicit variables above when configuring Docker or shared environments.
 
@@ -50,5 +52,6 @@ For host-run development, install dependencies with `npm ci`, set `DATABASE_URL`
 - If `migrate` exits, inspect `docker compose logs migrate postgres`; the application intentionally waits for a successful migration.
 - If `/health` reports unavailable, check that Postgres is healthy and the `.env` database values agree. Container connections use the host name `postgres`; host-run tools use `localhost`.
 - If the map shows its token setup state, add a public `pk.*` browser token and rebuild the application image. A Directions token is runtime-only and does not require an image rebuild.
+- If the map remains Reconnecting or reaches Error, confirm the backend is reachable at `/health` and that migrations completed. Use Retry after correcting a startup problem.
 - If port 3000 is occupied, change `APP_PORT` in `.env`. For host-run Vite against a different backend port, set `VITE_API_PROXY_TARGET` before starting it.
 - `docker compose build --no-cache app` performs a clean image rebuild. It does not delete the Postgres volume.
