@@ -7,7 +7,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspace @fleet-radar/web",
+    "build": "npm run build --workspace @fleet-radar/server && npm run build --workspace @fleet-radar/web",
     "dev": "npm run dev --workspace @fleet-radar/web",
     "generate:world": "tsx tools/generate-world.ts",
     "smoke:directions": "node --env-file=.env --import tsx tools/smoke-mapbox-directions.ts",

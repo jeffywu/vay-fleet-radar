@@ -1,0 +1,9 @@
+{
+  "name": "@fleet-radar/domain",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./events": "./src/events/index.ts"
+  }
+}

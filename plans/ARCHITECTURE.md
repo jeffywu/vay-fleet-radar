@@ -69,6 +69,16 @@ interface EventPublisher {
 
 The MVP uses an `InMemoryEventBus` implementing both ports with a small asynchronous queue or Node's built-in event primitives. This is not intended to simulate Kafka itself. It delivers typed records through transport-independent ports. The consumer, simulator, and dispatch engine must not depend on transport-specific metadata or on each other's concrete implementations.
 
+Ownership is explicit rather than represented by a separate event-bus package:
+
+- `packages/domain/src/events` owns the immutable event envelope and payload schemas, runtime validation, the `EventSource`, `EventPublisher`, and `FleetEventFactory` contracts, and the shared per-vehicle sequence allocator.
+- `packages/simulation` and `packages/dispatch` publish their domain facts through those contracts. Neither imports the concrete bus or backend consumer.
+- `apps/server/src/eventing` owns the `InMemoryEventBus`, consumer/projections, and composition wiring. A future Kafka adapter belongs here (or in a dedicated transport package only when its serialization, retry, configuration, and observability justify that boundary).
+
+The in-memory adapter validates and takes an immutable transport copy before queuing each publish, so later producer mutation cannot change an accepted record. It delivers each accepted event to all subscribers in call order. A publish resolves after all current subscribers finish. If one or more handlers fail, all handlers are still attempted and the publish rejects explicitly; the failure does not poison later queued events. Unsubscribe is idempotent, stops future publications, and provides deterministic cleanup. These are intentionally documented application semantics, not an attempt to reproduce Kafka consumer groups or acknowledgements.
+
+`FleetProjectionConsumer` is a process-local reference implementation for this initial slice. It assigns backend `receivedAt`, ignores duplicate event IDs, appends accepted records to an in-memory event log, and prevents stale telemetry sequences or route versions from replacing newer projections. The Postgres consumer replaces those collections with an append-and-project transaction without changing the producer contracts or transport boundary.
+
 There is no mature, framework-neutral TypeScript package that provides a drop-in in-memory Kafka broker and is justified for this MVP. Kafka clients such as KafkaJS or `@confluentinc/kafka-javascript` still require a broker. `@nest-native/kafka` includes an in-memory test broker, but it is a pre-1.0 NestJS-specific integration and does not justify selecting NestJS for this project.
 
 This boundary demonstrates the Kafka-relevant application behavior:
@@ -119,6 +129,7 @@ Route geometry is not repeated in telemetry events or persisted route events. It
 - Battery percentage is in the range `[0, 100]`.
 - Event timestamps are ISO 8601 UTC timestamps.
 - `sequence` is monotonically increasing per vehicle within a simulator run.
+- The composition root shares one `FleetEventFactory` across simulator and dispatch publishers so their events use one per-vehicle sequence domain. It is not a database version or Kafka offset.
 - `routeId` identifies a route assignment; `version` increases on route updates.
 - Staleness is based on backend `receivedAt`, not producer clock time.
 
@@ -305,9 +316,10 @@ Staleness must be conspicuous and must not silently present an old location as l
 The TypeScript workspace is separated by responsibility:
 
 - `packages/domain`: shared event schemas, commands, identifiers, and transport-neutral types.
-- `packages/simulator`: vehicle state model and the simulated implementation of `VehicleCommandPort`.
+- `packages/world`: validated, immutable bounded-world assets and the in-memory `WorldCatalog`.
+- `packages/simulation`: vehicle state model, simulator-owned event publisher, and the simulated implementation of `VehicleCommandPort`.
 - `packages/dispatch`: dispatch engine, strategy contract, random MVP strategy, job rules, and its required ports.
-- `apps/server`: composition root, immutable `WorldCatalog`, Mapbox Directions adapter, transient active-route store, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
+- `apps/server`: composition root, Mapbox Directions adapter, transient active-route store, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
 - `apps/web`: React operator dashboard and the initial Mapbox world-preview spike.
 
 Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. Running them in one server process is an MVP deployment choice, not a domain coupling.

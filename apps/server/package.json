@@ -1,0 +1,14 @@
+{
+  "name": "@fleet-radar/server",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@fleet-radar/dispatch": "*",
+    "@fleet-radar/domain": "*",
+    "@fleet-radar/simulation": "*"
+  }
+}

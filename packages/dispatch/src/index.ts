@@ -1,4 +1,5 @@
 import type { Coordinate, Destination, WorldCatalogView } from "@fleet-radar/world";
+import type { EventPublisher, FleetEventFactory } from "@fleet-radar/domain/events";
 
 export type DispatchVehicle = {
   readonly id: string;
@@ -33,3 +34,52 @@ export class RandomDispatchStrategy implements DispatchStrategy {
   }
 }
 
+/** Publishes dispatcher-owned job facts through the shared domain boundary. */
+export class DispatchEventEmitter {
+  constructor(
+    private readonly events: EventPublisher,
+    private readonly factory: FleetEventFactory,
+  ) {}
+
+  publishAssignmentRequested(input: {
+    dispatchJobId: string;
+    vehicleId: string;
+    routeId: string;
+    routeVersion: number;
+    destinationId: string;
+    strategy: string;
+    reason?: string;
+  }): Promise<void> {
+    return this.events.publish(this.factory.create({
+      eventType: "dispatch.assignment-requested",
+      vehicleId: input.vehicleId,
+      correlationId: input.dispatchJobId,
+      payload: {
+        dispatchJobId: input.dispatchJobId,
+        routeId: input.routeId,
+        routeVersion: input.routeVersion,
+        destinationId: input.destinationId,
+        strategy: input.strategy,
+        reason: input.reason,
+      },
+    }));
+  }
+
+  publishAssignmentCompleted(input: {
+    dispatchJobId: string;
+    vehicleId: string;
+    routeId: string;
+    routeVersion: number;
+  }): Promise<void> {
+    return this.events.publish(this.factory.create({
+      eventType: "dispatch.assignment-completed",
+      vehicleId: input.vehicleId,
+      correlationId: input.dispatchJobId,
+      payload: {
+        dispatchJobId: input.dispatchJobId,
+        routeId: input.routeId,
+        routeVersion: input.routeVersion,
+      },
+    }));
+  }
+}
