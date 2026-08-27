@@ -8,7 +8,9 @@ My initial thought for the approach and architecture looks like this:
 
 - Simulation Engine: a parameterized state model. On every "tick" it will loop over every vehicle, update its internal state, and then emit an event for each car. It accepts requests from the Dispatch Engine to move a car into the EN_ROUTE state with a given destination. Other than the events it emits its internal state should be treated as a black box to the rest of the system.
 
-- Data Backend: use Postgres with PostGIS, receive events from the Simulation Engine over a REST API endpoint and insert them into a single append only table. For each data element we want to display on the UI, create a corresponding view which encapsulates the relevant calculation.
+The two components above comprise of the "external" environment and should not be considered part of the Vay operational system. The components below correspond to the Vay operational system.
+
+- Data Backend: use Postgres with PostGIS, receive events from the Simulation Engine over a REST API endpoint and insert them into a single append only table. For each data element we want to display on the UI, create corresponding views which encapsulates the relevant calculation.
 
 - Dispatch Engine: Vay provides a remote teledriving service. The dispatch engine will match teledrivers to a queue of cars. The dispatch engine core should simple, but provide hooks for optional extension of the rules so that it may be configured to optimized for more complex, data driven rules or optimization.
 
@@ -26,7 +28,7 @@ The valid state transitions are:
 
 FREE => WITH_CUSTOMER: in this transition there will be some "hidden" route that the car follows and the car will generate revenue
 FREE => EN_ROUTE: in this transition the car will be moving but the route will be known and set via the dispatch, the car does not generate revenue. A car cannot go into EN_ROUTE without a message from dispatch.
-FREE <=> IN_SERVICE: this can be done via the dispatch queue by the fleet operator. this car will not move and will not be available for customers. it does not generate revenue while in service.
+[Future Work] FREE <=> IN_SERVICE: this can be done via the dispatch queue by the fleet operator. this car will not move and will not be available for customers. it does not generate revenue while in service.
 WITH_CUSTOMER => FREE: the car will stop moving and stop generating revenue, it will be available for a new transition
 EN_ROUTE => FREE: the car will stop moving and become available for a new transition
 WITH_CUSTOMER <=> EN_ROUTE: this is an invalid transition, the car should always go into a "FREE" state if only briefly
@@ -44,9 +46,7 @@ Configurable parameters are as follows. These should be configurable in a user f
 
 ## Data Backend
 
-Use Postgres with PostGIS for the backend. There should be a simple API for data ingestion. Direct SQL access for views for the Dispatch Queue and Frontend should be sufficient, there is no need to create an HTTP REST API for this demo.
-
-Maintain a data dictionary and a clear documentation of what each view does, how its calculated and what it informs on the UI or the dispatch queue as the views will be the primary "API". Do not worry about materializing or any performance optimizations beyond effective indexing.
+Use Postgres with PostGIS for the backend. There should be a simple API for data ingestion and expose REST APIs for view data.  Maintain a data dictionary and a clear documentation of what each view does, how its calculated and what it informs on the UI or the dispatch queue as the views will be the primary "API". Do not worry about materializing or any performance optimizations beyond effective indexing.
 
 ## Dispatch Queue
 
@@ -95,6 +95,6 @@ As the business owner, I need to know:
 
 - Use typescript as the coding language
 - Use postgres as the backend
-- Use MapBox for the mapping engine
+- Use MapBox for the mapping engine and routing generation
 - Dockerize the system so that it can be run end to end locally
 - Add the ability to deploy to Railway using a docker compose file
