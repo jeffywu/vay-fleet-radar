@@ -1,100 +1,364 @@
 # Fleet Radar Architecture
 
-This is a take home task for a technical interview with Vay. Vay is a remote teledriving startup focused on a consumer market. This exercise is aimed at understanding how an engineer would approach their complex operational system. See plans/ASSIGNMENT.md to understand the user stories and requirements for the task.
+This project is a take-home exercise for Vay, a remote-driving company. The objective is to build a small, operator-focused Fleet Radar while demonstrating full-stack delivery, event-driven thinking, real-time state handling, and pragmatic architectural choices. See `plans/ASSIGNMENT.md` for the original requirements.
 
-My initial thought for the approach and architecture looks like this:
+The implementation is deliberately a narrow end-to-end slice that can be completed and explained within the assignment timebox. A lightweight dispatch engine is part of that slice because dispatch is a real operational-system responsibility, not simulator behavior. Charging, incidents, demand forecasting, and advanced dispatch policies remain extension points rather than partially implemented subsystems.
 
-- Map Area and Destination List: this will define the valid operating area of the map and a list of valid destinations. This will be a static asset pre-generated during development. The simulation engine and the dispatch engine will select destinations from this list.
+## Goals and Non-Goals
 
-- Simulation Engine: a parameterized state model. On every "tick" it will loop over every vehicle, update its internal state, and then emit an event for each car. It accepts requests from the Dispatch Engine to move a car into the EN_ROUTE state with a given destination. Other than the events it emits its internal state should be treated as a black box to the rest of the system.
+### MVP goals
 
-The two components above comprise of the "external" environment and should not be considered part of the Vay operational system. The components below correspond to the Vay operational system.
+- Simulate approximately 100 vehicles, including approximately 10 simultaneously in `EN_ROUTE` status.
+- Display every vehicle's location, heading, battery percentage, required status, and data freshness.
+- Display the current route for vehicles in `EN_ROUTE` status.
+- Update the dashboard as telemetry and route events arrive.
+- Give an operator a clear map, fleet table, filters, legend, low-battery signal, and stale-data signal.
+- Treat immutable telemetry and route events as the source of truth and maintain queryable current-state projections.
+- Use a separate dispatch package to keep approximately 10 eligible vehicles `EN_ROUTE` through a replaceable assignment strategy.
+- Run the complete application locally with Docker Compose.
+- Preserve a clean boundary at which a simulated event source can be replaced by a Kafka consumer.
 
-- Data Backend: use Postgres with PostGIS, receive events from the Simulation Engine over a REST API endpoint and insert them into a single append only table. For each data element we want to display on the UI, create corresponding views which encapsulates the relevant calculation.
+### MVP non-goals
 
-- Dispatch Engine: Vay provides a remote teledriving service. The dispatch engine will match teledrivers to a queue of cars. The dispatch engine core should simple, but provide hooks for optional extension of the rules so that it may be configured to optimized for more complex, data driven rules or optimization.
+- Running Kafka or reproducing Kafka's wire protocol, partitions, replication, consumer-group coordination, or offset storage.
+- Production-grade dispatch optimization or teledriver scheduling.
+- Charging-station workflows, field-agent dispatch, or customer-support workflows.
+- Authentication and authorization, which the assignment explicitly excludes.
+- A historical business-intelligence dashboard.
+- Production deployment or production-scale infrastructure.
 
-- Web Dashboard: the web dashboard should provide a MapBox view for a hypothetical fleet operator to understand the state of the fleet, the dispatch queue, and other important fleet information. The map component of the dashboard is important, but it should also provide sortable, filterable tables, and other data visualizations that aid the understanding of various fleet metrics. Each area of the web dashboard should be centered around a fleet operator user story for what they are trying to understand or accomplish in that view.
+These non-goals remain useful discussion topics and are covered under Future Work.
+
+## System Context and Data Flow
+
+The map area, service zones, destinations, and route geometries are static development assets. Precomputed GeoJSON routes keep the demo deterministic and avoid making runtime routing API calls. The simulator and event-source adapter represent the external vehicle/Kafka environment. Dispatch, event consumption, projections, APIs, and the dashboard are operational-system responsibilities.
+
+```mermaid
+flowchart LR
+    S[Vehicle simulator] -->|telemetry and route events| M[In-memory event bus]
+    K[Future Kafka consumer] -. same port .-> C[Event consumer]
+    M --> C
+    C -->|append and project in one transaction| P[(Postgres)]
+    P -->|current fleet and jobs| D[Dispatch engine]
+    R[Route catalog] --> D
+    D -->|assignment command| S
+    D -->|dispatch events| M
+    P --> A[REST snapshot API]
+    C --> E[SSE event stream]
+    A --> W[Operator dashboard]
+    E --> W
+```
+
+The browser first loads a consistent snapshot over REST and then applies deltas from a Server-Sent Events stream. SSE is preferred over WebSockets because communication is primarily server-to-browser and automatic reconnection is useful. On an unrecoverable gap or server restart, the browser reloads the snapshot.
+
+## Event-Driven Boundary
+
+Kafka is not required to run for this assignment. The application defines the smallest transport-independent boundary it needs:
+
+```ts
+interface EventSource {
+  subscribe(handler: (event: FleetEvent) => Promise<void>): Promise<() => Promise<void>>;
+}
+
+interface EventPublisher {
+  publish(event: FleetEvent): Promise<void>;
+}
+```
+
+The MVP uses an `InMemoryEventBus` implementing both ports with a small asynchronous queue or Node's built-in event primitives. This is not intended to simulate Kafka itself. It only delivers typed records through the same ports used by future Kafka adapters. The consumer, simulator, and dispatch engine must not depend on transport-specific metadata or on each other's concrete implementations.
+
+There is no mature, framework-neutral TypeScript package that provides a drop-in in-memory Kafka broker and is justified for this MVP. Kafka clients such as KafkaJS or `@confluentinc/kafka-javascript` still require a broker. `@testcontainers/kafka` is a good future integration-test option, but it starts a real Kafka container. `@nest-native/kafka` includes an in-memory test broker, but it is a pre-1.0 NestJS-specific integration and does not justify selecting NestJS for this project. If protocol compatibility becomes a requirement, `kcat -M` or Testcontainers should be used instead of expanding the in-memory adapter into a home-grown broker.
+
+This boundary demonstrates the Kafka-relevant application behavior:
+
+- Events are immutable and may be delivered at least once.
+- A vehicle ID is the future partition key, preserving per-vehicle order.
+- Event IDs make consumption idempotent.
+- Per-vehicle sequence numbers prevent older telemetry from overwriting newer state.
+- Events are validated at ingestion and invalid events fail explicitly.
+- Current-state projections can be rebuilt from the event log.
+
+Consumer-group rebalancing, broker acknowledgements, offset commits, retention, and dead-letter topics are production concerns and should only be tested against a real Kafka-compatible broker.
+
+## Event Model
+
+Every event uses a common envelope:
+
+```ts
+type FleetEvent<TType extends string = string, TPayload = unknown> = {
+  eventId: string;
+  eventType: TType;
+  schemaVersion: 1;
+  vehicleId: string;
+  sequence: number;
+  occurredAt: string;
+  correlationId?: string;
+  payload: TPayload;
+};
+```
+
+`receivedAt` is assigned by the backend rather than trusted from the producer. A dispatch job ID is used as the correlation ID across an assignment command and the events it causes.
+
+MVP event types are:
+
+- `vehicle.telemetry-received`: location, heading, battery percentage, and display status.
+- `route.assigned`: route ID, version, destination, and GeoJSON `LineString`.
+- `route.updated`: a newer version of an active route.
+- `route.cancelled`: the active route is no longer valid.
+- `route.completed`: the vehicle has completed the route.
+- `route.assignment-rejected`: the vehicle could not accept a dispatch assignment.
+- `dispatch.assignment-requested`: the dispatcher selected a vehicle and route.
+- `dispatch.assignment-completed`: the correlated route completed.
+
+Route geometry is not repeated in telemetry events. Route events and telemetry have independent timestamps and versions so the UI can distinguish stale vehicle data from stale route data.
+
+### Data semantics
+
+- Coordinates use WGS84 and GeoJSON order: `[longitude, latitude]`.
+- Heading is degrees in the range `[0, 360)`, where `0` is north.
+- Battery percentage is in the range `[0, 100]`.
+- Event timestamps are ISO 8601 UTC timestamps.
+- `sequence` is monotonically increasing per vehicle within a simulator run.
+- `routeId` identifies a route assignment; `version` increases on route updates.
+- Staleness is based on backend `receivedAt`, not producer clock time.
+
+The MVP preserves the assignment's `FREE | WITH_CUSTOMER | EN_ROUTE` status. In a production domain model this value should be derived from independent concepts such as customer occupancy, control mode, service availability, energy state, connectivity, and incident state. Keeping these dimensions separate avoids forcing combinations such as customer support or low battery into a single state machine.
 
 ## Simulation Engine
 
-This is a parameterized state model. On every “tick” it will loop over every vehicle and update its state and then emit an event. The emitted event may have a schema like:
+The simulator is a deterministic, parameterized state model and is external to the operational system. A seeded random-number generator makes runs and tests reproducible.
 
-`{ latLong, direction, batteryPercentage, status: ["FREE", "WITH_CUSTOMER", "EN_ROUTE", "IN_SERVICE"], timestamp, carId, revenueGenerated }`
+On each tick it:
 
-This event will be fired to the Data Backend.
+1. Advances moving vehicles along their current route.
+2. Updates heading and battery based on distance travelled.
+3. Performs permitted state transitions.
+4. Emits one telemetry event for each vehicle unless that vehicle is simulating a telemetry gap.
+5. Emits route lifecycle events when assignments change or complete.
 
-The valid state transitions are:
+The simulator also implements a `VehicleCommandPort`. An assignment command contains a command ID, dispatch job ID, vehicle ID, route ID, and route version. The simulator validates the vehicle's observed state and range at command time. It either starts movement and emits `route.assigned`, or leaves the vehicle unchanged and emits `route.assignment-rejected`. This models the fact that a dispatch decision is a request to the vehicle domain rather than an immediate mutation of simulator internals.
 
-FREE => WITH_CUSTOMER: in this transition there will be some "hidden" route that the car follows and the car will generate revenue
-FREE => EN_ROUTE: in this transition the car will be moving but the route will be known and set via the dispatch, the car does not generate revenue. A car cannot go into EN_ROUTE without a message from dispatch.
-[Future Work] FREE <=> IN_SERVICE: this can be done via the dispatch queue by the fleet operator. this car will not move and will not be available for customers. it does not generate revenue while in service.
-WITH_CUSTOMER => FREE: the car will stop moving and stop generating revenue, it will be available for a new transition
-EN_ROUTE => FREE: the car will stop moving and become available for a new transition
-WITH_CUSTOMER <=> EN_ROUTE: this is an invalid transition, the car should always go into a "FREE" state if only briefly
+The valid MVP display-status transitions are:
 
-Configurable parameters are as follows. These should be configurable in a user friendly TOML or YAML file and read on initialization.
+- `FREE -> WITH_CUSTOMER`: simulated customer demand starts a trip. The simulator follows a route, but that route is not shown as a remote-driving assignment.
+- `WITH_CUSTOMER -> FREE`: the customer trip completes.
+- `FREE -> EN_ROUTE`: only an accepted dispatch assignment command can start remote repositioning.
+- `EN_ROUTE -> FREE`: the assigned route completes or is cancelled.
+- `WITH_CUSTOMER <-> EN_ROUTE`: invalid; the MVP returns through `FREE`.
 
-1. Number of Cars
-2. Revenue generated per tick
-3. "Free" time range (we will randomly select some time that the car will wait in a "free" state before the next state transition)
-4. WITH_CUSTOMER probability, which is the % chance that a car will go from FREE => WITH_CUSTOMER, otherwise it goes to EN_ROUTE.
-6. EV miles per kwh along with total kwh in the car. This needs to be decremented as the car travels. If this is below some threshold the car must remain in the FREE state. Before a route is assigned the simulation will check if there is sufficient range to go there, if not it will loop through routes until it finds one. It will reject a dispatch request if there is insufficient range.
-7. Time scale per tick, so that we can speed up or slow down the simulation
-8. Randomize data loss due to latency or signal loss, do this as a percent of events
-9. [OPTIONAL] add a charging model to the simulation engine, this should not be considered MVP
+The simulator never chooses `EN_ROUTE` independently; this status always has an accepted dispatch job and route assignment. The dispatch engine, not the simulator, is responsible for maintaining the target number of active assignments.
+
+Configuration is read from a small YAML or TOML file:
+
+- Seed and number of vehicles.
+- Tick interval and simulated time multiplier.
+- Customer-trip probability and free-time range.
+- Battery capacity, energy consumption per distance, and low-battery threshold.
+- Telemetry-gap probability and maximum gap duration.
+- Service-area and route-asset locations.
+
+A lightweight demo recharge rule restores low-battery vehicles after a simulated delay so the fleet does not eventually become inert. Charging locations, queues, and operator workflows remain future work.
+
+## Dispatch Engine
+
+Dispatch is an MVP package and part of the operational system. It is not bundled into the simulator. The package may run in the same Node process for a small local demo, but its dependencies are ports so it can become an independently deployed service without changing its decision logic.
+
+The dispatch package owns:
+
+- Dispatch-job creation and lifecycle.
+- Selection of an eligible vehicle and destination through a configured strategy.
+- Prevention of more than one active dispatch job per vehicle.
+- Submission of idempotent assignment commands through `VehicleCommandPort`.
+- Correlation of accepted, rejected, completed, and cancelled route events with jobs.
+- Maintaining the configured target of approximately 10 active `EN_ROUTE` assignments.
+
+It depends on abstractions owned by the dispatch package or shared domain package:
+
+```ts
+interface DispatchStrategy {
+  select(context: DispatchContext): DispatchDecision | null;
+}
+
+interface FleetStateReader {
+  getDispatchContext(): Promise<DispatchContext>;
+}
+
+interface DispatchJobRepository {
+  tryCreate(decision: DispatchDecision): Promise<DispatchJob | null>;
+}
+
+interface VehicleCommandPort {
+  assignRoute(command: AssignRouteCommand): Promise<void>;
+}
+```
+
+`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, available routes, and configuration. `DispatchDecision` identifies a vehicle and route and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for invariants, persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles or future engine instances.
+
+The MVP uses `RandomDispatchStrategy`. On a configurable interval, the engine compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, chooses a reachable route, creates a job, and sends the command. The random generator is seeded so behavior is reproducible. Rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle.
+
+The job lifecycle is `REQUESTED -> ACCEPTED -> IN_PROGRESS -> COMPLETED`, with `REJECTED`, `CANCELLED`, and `FAILED` alternatives. Job state is distinct from vehicle display status. The strategy is selected by configuration from an explicit registry; dynamic plug-in loading or a generic rules framework is unnecessary for the MVP.
+
+Future strategies can use nearest-vehicle distance, battery, zone coverage deficit, predicted demand, charging needs, teledriver capacity, service-level objectives, or an optimizer. They replace only `DispatchStrategy`, not job handling or vehicle command semantics. Revenue maximization cannot be evaluated meaningfully until demand, costs, operational capacity, service-level objectives, and an optimization horizon are defined.
+
+MVP dispatch configuration includes the strategy name, target active assignments, dispatch interval, seeded-random configuration, and maximum new jobs per cycle.
 
 ## Data Backend
 
-Use Postgres with PostGIS for the backend. There should be a simple API for data ingestion and expose REST APIs for view data.  Maintain a data dictionary and a clear documentation of what each view does, how its calculated and what it informs on the UI or the dispatch queue as the views will be the primary "API". Do not worry about materializing or any performance optimizations beyond effective indexing.
+Postgres is the durable store. PostGIS is included only if the MVP implements zone membership or proximity queries; displaying points and precomputed routes alone does not require it.
 
-## Dispatch Queue
+The minimum tables are:
 
-For the first version of this demo the dispatch queue should simply communicate with the Simulation Engine and put cars in the FREE => EN_ROUTE state change. It should maintain a mapping of which teledriver is assigned to which car. A single teledriver can only drive one car at a time. The queue may enqueue future transitions as teledrivers become available. 
+### `event_log`
 
-The goal of the dispatch queue is to maximize the total revenue of the system. Because of that, make sure that the rule engine is modular and can be easily extended for different potential rule engines.
+An append-only record of accepted events with `event_id`, event type, schema version, vehicle ID, sequence, occurred time, received time, and JSON payload. `event_id` is unique for idempotency. The event log is the replayable source of truth.
 
-The number of teledrivers should be configurable via the main configuration file described in simulation engine.
+### `vehicle_current`
 
-## Web Dashboard
+One current row per vehicle containing location, heading, battery, display status, last sequence, last occurred time, and last received time. An event only updates this projection when its sequence is newer than the stored sequence.
 
-The front end will be a dashboard that allows operations to see everything that is going on. In your execution plan, define relevant metrics and display widgets to ensure that the user stories for the two personas can be met.
+### `route_current`
 
-As a fleet operator, my goal is to maximize the utilization of the current fleet.
+At most one active route per vehicle, including route ID, version, destination, geometry, lifecycle state, and update time. A route update only applies when its version is newer than the stored version.
 
-As a fleet operator, I need to know:
-- where all the cars are at all times.
-- the current state of each car
-- where EN_ROUTE cars are going
-- which cars need to be charged and where they are.
-- the state of the dispatch queue.
-- what each teledriver is doing
-- identify areas of the map that have low FREE car density
+### `dispatch_job`
 
-As a fleet operator, I need to be able to:
-- call a car to support the customer (just stub this action out)
-- remove items from the dispatch queue
-- re-route cars that are EN_QUEUE
-- manually add entries to the dispatch queue
-- put a car into IN_SERVICE where it cannot be transition into WITH_CUSTOMER
+One row per dispatch attempt containing job ID, vehicle ID, route ID and version, strategy name, lifecycle state, decision reason, command ID, correlation ID, and timestamps. A partial unique constraint prevents more than one active job per vehicle. Dispatch-job history supports operator visibility and later strategy evaluation.
 
-As a business owner, my goal is to maximize the long term revenue of the fleet through strategic growth planning.
+The consumer validates an event, appends it to `event_log`, and updates the relevant projection in one database transaction. A duplicate event is acknowledged without changing state. Projection-rebuild code can truncate derived tables and replay the log in event order.
 
-As the business owner, I need to know:
-- the total fleet revenue
-- the total trips
-- the average revenue per car
-- the average time per customer trip, per teledriver route
-- the current fleet utilization by customers, service, and teledrivers
-- the average fleet utilization by customers, service, and teledrivers over the last hour
-- areas of the map which generate revenue
-- areas of the map where trips tend to start and end
+Database views are reserved for stable domain calculations such as zone coverage. REST response shapes, UI widgets, and ad hoc presentation calculations should not each become database views.
 
+## API and Real-Time Updates
+
+Minimum endpoints are:
+
+- `GET /api/vehicles`: current vehicle snapshot, with active route summaries where applicable.
+- `GET /api/vehicles/:vehicleId`: vehicle details and active route geometry.
+- `GET /api/dispatch-jobs`: active and recent dispatch jobs.
+- `GET /api/events`: SSE stream of accepted vehicle, route, and dispatch projection updates.
+- `GET /health`: application and database readiness.
+
+SSE messages include an event ID and only the changed projection. The backend may coalesce updates over a short interval if the simulator runs faster than the browser should render. The browser applies updates to an indexed client-side collection and updates Mapbox data in batches rather than rendering one React/DOM marker per vehicle.
+
+There are no public mutation endpoints in the MVP. If a simulated event-ingestion HTTP adapter is added for process isolation, it is an internal adapter, validates the same envelope, has a request-size limit, and is not treated as the event source of truth.
+
+## Operator Dashboard
+
+The MVP is one coherent operator view rather than separate operational and business dashboards:
+
+- Mapbox map with vehicle symbols, heading, status color, and stale styling.
+- Route overlay for the selected `EN_ROUTE` vehicle, with an optional toggle for all active routes.
+- Fleet table with vehicle ID, status, battery, freshness, and destination.
+- Search and filters for status, low battery, and stale telemetry.
+- Selected-vehicle detail panel with exact timestamps and route information.
+- Legend and KPI strip for `FREE`, `WITH_CUSTOMER`, `EN_ROUTE`, low-battery, and stale counts.
+- Compact dispatch queue showing requested, active, rejected, and recently completed jobs.
+- Optional predefined service-zone overlay showing `FREE` vehicle count versus a configurable target.
+
+Staleness must be conspicuous and must not silently present an old location as live. Coverage is calculated over named operational zones rather than arbitrary empty map cells. A demand-weighted hex-grid model is future work.
+
+Operator mutation controls such as customer support, manually creating, removing, or rerouting dispatch jobs, and placing a vehicle out of service are shown only as future-work designs or non-functional stubs if time permits.
 
 ## Infrastructure
 
-- Use typescript as the coding language
-- Use postgres as the backend
-- Use MapBox for the mapping engine and routing generation
-- Dockerize the system so that it can be run end to end locally
-- Add the ability to deploy to Railway using a docker compose file
+- TypeScript for simulator, backend, shared event schemas, and frontend.
+- A lightweight Node HTTP framework and schema validation library; framework selection should favor delivery speed and readable code.
+- React with Mapbox GL JS for the dashboard.
+- Postgres, optionally with PostGIS when spatial queries are implemented.
+- Dockerfiles for application services and Docker Compose for reproducible local orchestration.
+- Environment variables for database credentials and the Mapbox public token; `.env.example` contains names and safe placeholders only.
+
+The TypeScript workspace is separated by responsibility:
+
+- `packages/domain`: shared event schemas, commands, identifiers, and transport-neutral types.
+- `packages/simulator`: vehicle state model and the simulated implementation of `VehicleCommandPort`.
+- `packages/dispatch`: dispatch engine, strategy contract, random MVP strategy, job rules, and its required ports.
+- `apps/server`: composition root, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
+- `apps/web`: operator dashboard.
+
+Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. Running them in one server process is an MVP deployment choice, not a domain coupling. A future deployment can replace the in-process ports with Kafka and command-service adapters.
+
+Mapbox browser tokens are necessarily visible to the browser. Use a least-privilege public token, configure localhost/deployment URL restrictions where practical, and never expose a secret token. Precomputed route assets avoid requiring a Directions API credential during the demo.
+
+Docker Compose is the local runtime contract. Railway does not execute a Compose application as one production unit; each Compose service maps to a Railway service and Postgres should use Railway's managed database. Railway deployment is optional future documentation, not an MVP requirement.
+
+## Scale to 1,000 Vehicles: Operational and Technical
+
+Scaling from 100 to 1,000 vehicles is first an operating-model change. A person may be able to scan 100 map markers and notice anomalies; no operator can continuously understand 1,000 moving vehicles from a map. The product must evolve from fleet surveillance to exception management, explicit work ownership, and supervised automation.
+
+### Operating model
+
+- Partition the service area into operational zones with named owners, local targets, and escalation paths. Zones should be reassignable during demand spikes or staffing changes.
+- Separate roles where necessary: fleet monitoring, dispatch supervision, customer incidents, charging/field operations, and shift supervision. Role-specific views should share the same underlying state.
+- Represent operational work as owned queue items with priority, state, assignee, age, and service-level target. A colored vehicle marker is not a workflow.
+- Support shift handoff with unresolved-work summaries, recent decisions, vehicle notes, and acknowledgement by the incoming operator.
+- Model human and physical capacity explicitly: available teledrivers, operator queue load, charging bays, field agents, and expected response times. A dispatch strategy that ignores constrained resources will create unsafe or impossible plans.
+- Define degraded modes and runbooks for telemetry loss, command failure, route-service outage, demand surges, and dispatch-service unavailability.
+
+### Exception-oriented dashboard
+
+- Default to zone health, coverage deficit, queue age, capacity, incidents, and SLA risk rather than displaying 1,000 equally prominent vehicles.
+- Cluster and aggregate healthy vehicles, with progressive drill-down from fleet to zone to queue to vehicle.
+- Turn anomalies into a lifecycle: severity, deduplication, suppression, acknowledgement, ownership, notes, resolution, and escalation. Repeated telemetry samples must not create repeated human alerts.
+- Preserve a global map for situational context, but make prioritized queues the primary way operators discover and complete work.
+- Measure operator outcomes such as time to acknowledge, time to resolve, queue age, SLA breaches, workload per operator, handoff quality, automation overrides, and false-positive alert rate.
+
+### Dispatch automation and control
+
+At 1,000 vehicles, random assignment is replaced by policy-driven automation behind the same `DispatchStrategy` contract. Strategies must account for zone coverage, demand, range, charging, teledriver and operator capacity, service objectives, and the cost of moving a vehicle away from its current zone.
+
+Automated decisions should expose their reason and relevant constraints so an operator can understand and override them. Overrides, strategy versions, inputs, and outcomes need an audit trail so the business can compare strategies safely. Risky commands require idempotency, clear acknowledgement, permissions, and confirmation; bulk actions need tighter safeguards than single-vehicle actions.
+
+The system should support staged automation: recommendation only, operator approval, bounded autonomous dispatch, and broader automation after measured performance. Strategy rollout should use simulation or replay, shadow decisions, zone-level canaries, and explicit rollback criteria rather than changing the whole fleet at once.
+
+### Technical enablers
+
+At one telemetry update per second, 1,000 vehicles produce approximately 1,000 events per second. The technical path is straightforward relative to the operational changes:
+
+- Partition telemetry by vehicle ID and run stateless consumers in a consumer group.
+- Batch event inserts and projection updates while preserving ordering and idempotency.
+- Keep reads on compact, role-oriented projections rather than scanning history.
+- Coalesce SSE and browser updates to a useful visual cadence and use Mapbox layers rather than DOM markers.
+- Build zone, alert, workload, and dispatch-queue projections that match operator workflows.
+- Apply retention or archival policies to the event log independently of current projections.
+- Measure consumer lag, projection age, invalid events, command acknowledgement, dispatch decision latency, database latency, and connected clients.
+
+Technical capacity is necessary, but safe operational leverage is the real scaling objective: the number of vehicles requiring attention per operator must remain bounded as the fleet grows.
+
+## Testing
+
+Tests should cover both happy paths and edge conditions:
+
+- Valid and invalid simulator transitions.
+- Deterministic movement, heading, battery depletion, and demo recharge.
+- Required `EN_ROUTE` count and associated route presence.
+- Deterministic random-strategy decisions and strategy selection by configuration.
+- Dispatch eligibility, one-active-job-per-vehicle, target concurrency, command rejection, and retry on a later cycle.
+- Dispatch job correlation across requested, accepted, completed, and rejected events.
+- Event-schema validation.
+- Duplicate and out-of-order event handling.
+- Atomic event append and projection update.
+- Route assignment, update, cancellation, and completion.
+- Projection rebuild from the event log.
+- Telemetry staleness after a simulated gap.
+- REST snapshot and SSE update integration.
+- A frontend smoke test for selection, filtering, and route display.
+
+A later Kafka adapter should have at least one integration test against a real disposable broker using Testcontainers. The in-memory source is appropriate for application tests but cannot establish wire-protocol or consumer-group compatibility.
+
+## Future Work
+
+- Real Kafka ingestion, schema registry, consumer lag monitoring, dead-letter handling, and replay tooling.
+- Multidimensional vehicle state covering occupancy, control mode, service availability, energy, connectivity, and incidents.
+- Charging stations, charge queues, range-aware dispatch, and energy-cost optimization.
+- Teledriver scheduling, advanced command retries and cancellation, strategy experimentation, and operator audit workflows.
+- Customer-support and field-agent incident workflows.
+- Demand forecasting and demand-weighted coverage using H3 or another spatial index.
+- Trip and revenue events, historical aggregates, business dashboards, and explicit metric definitions.
+- Authentication, role-based authorization, command approval, and immutable operator audit logs.
+- Data retention, privacy controls, observability, alerting, and disaster recovery.
+- Railway or another production deployment topology with managed Postgres and independently scalable services.
+
+## Deliverables and Tradeoffs
+
+The repository must include backend and frontend code, Docker-based local-run instructions, configuration examples, test instructions, and a concise README describing the 100-vehicle data and dispatch flow. The README should state that Kafka, advanced dispatch optimization, historical analytics, and production deployment were deliberately deferred to keep the implementation complete and reviewable within the timebox.
