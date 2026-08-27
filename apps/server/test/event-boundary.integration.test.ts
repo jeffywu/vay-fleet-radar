@@ -13,6 +13,7 @@ describe("event boundary composition", () => {
     });
     await boundary.dispatchEvents.publishAssignmentRequested({
       dispatchJobId: "job-1",
+      commandId: "assign-1",
       vehicleId: "vehicle-1",
       routeId: "route-1",
       routeVersion: 1,
@@ -30,7 +31,7 @@ describe("event boundary composition", () => {
     expect(boundary.consumer.eventLog().map((event) => event.sequence)).toEqual([1, 2, 3]);
     expect(boundary.consumer.vehicle("vehicle-1")?.status).toBe("FREE");
     expect(boundary.consumer.route("vehicle-1")?.routeId).toBe("route-1");
-    expect(boundary.consumer.dispatchJob("job-1")).toMatchObject({ state: "REQUESTED", strategy: "random" });
+    expect(boundary.consumer.dispatchJob("job-1")).toMatchObject({ commandId: "assign-1", state: "REQUESTED", strategy: "random" });
     await boundary.close();
   });
 });

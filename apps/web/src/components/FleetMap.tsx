@@ -155,7 +155,7 @@ export function FleetMap({ onDestinationSelect, onWorldLoad }: FleetMapProps) {
       {status === "missing-token" && (
         <div className="map-state map-state--setup">
           <strong>Mapbox token required</strong>
-          <span>Set MAPBOX_TOKEN in the repository .env or VITE_MAPBOX_ACCESS_TOKEN in apps/web/.env.local, then restart the dev server.</span>
+          <span>Set a public VITE_MAPBOX_ACCESS_TOKEN (or local MAPBOX_TOKEN) in the repository .env, then restart the dev server.</span>
         </div>
       )}
       {status === "error" && <div className="map-state map-state--error"><strong>Map unavailable</strong><span>{errorMessage}</span></div>}

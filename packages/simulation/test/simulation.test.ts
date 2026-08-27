@@ -128,6 +128,19 @@ describe("dispatch command boundary", () => {
     expect(events.filter(({ eventType }) => eventType === "route.completed")).toHaveLength(1);
     expect(JSON.stringify(events)).not.toContain("geometry");
   });
+  it("accepts a new version-one route after a vehicle completes an earlier route", async () => {
+    const { engine } = harness();
+    const vehicle = engine.snapshots()[0];
+    const firstDestination = world.destinations.find((value) => value.id !== vehicle.currentDestinationId)!;
+    await expect(engine.assignRoute({ commandId: "command-1", dispatchJobId: "job-1", vehicleId: vehicle.id,
+      routeId: "route-1", routeVersion: 1, destinationId: firstDestination.id })).resolves.toMatchObject({ accepted: true });
+    await engine.advance(11_000);
+    const secondDestination = world.destinations.find((value) => value.id !== firstDestination.id)!;
+    await expect(engine.assignRoute({ commandId: "command-2", dispatchJobId: "job-2", vehicleId: vehicle.id,
+      routeId: "route-2", routeVersion: 1, destinationId: secondDestination.id })).resolves.toEqual({
+      accepted: true, routeId: "route-2", routeVersion: 1,
+    });
+  });
   it("coalesces concurrent retries of one assignment command", async () => {
     let finishRoute!: (value: PlannedRoute) => void;
     const deferred = new Promise<PlannedRoute>((resolve) => { finishRoute = resolve; });

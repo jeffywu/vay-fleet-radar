@@ -21,5 +21,7 @@ export type CreateFleetEventInput<TType extends FleetEventType> = {
 };
 
 export interface FleetEventFactory {
+  /** Hydrates the last accepted sequence for each vehicle before producers start. */
+  initializeSequences(sequences: Iterable<readonly [vehicleId: string, sequence: number]>): void;
   create<TType extends FleetEventType>(input: CreateFleetEventInput<TType>): FleetEvent<TType>;
 }

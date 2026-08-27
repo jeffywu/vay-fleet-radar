@@ -8,11 +8,20 @@
   ],
   "scripts": {
     "build": "npm run build --workspace @fleet-radar/server && npm run build --workspace @fleet-radar/web",
-    "dev": "npm run dev --workspace @fleet-radar/web",
+    "db:migrate": "npm run db:migrate --workspace @fleet-radar/server",
+    "db:migrate:down": "npm run db:migrate:down --workspace @fleet-radar/server",
+    "db:rebuild-projections": "npm run db:rebuild-projections --workspace @fleet-radar/server",
+    "dev": "npm run dev:web",
+    "dev:server": "npm run dev --workspace @fleet-radar/server",
+    "dev:web": "npm run dev --workspace @fleet-radar/web",
+    "docker:config": "docker compose --env-file .env.example config --quiet",
+    "docker:smoke": "sh tools/docker-smoke.sh",
     "generate:world": "tsx tools/generate-world.ts",
     "smoke:directions": "node --env-file=.env --import tsx tools/smoke-mapbox-directions.ts",
     "smoke:web": "playwright test --config apps/web/playwright.config.ts",
     "test": "vitest run",
+    "test:api": "vitest run apps/server/test/api --no-file-parallelism",
+    "test:db": "vitest run apps/server/test/database apps/server/test/eventing --no-file-parallelism",
     "test:watch": "vitest"
   },
   "devDependencies": {
@@ -21,9 +30,11 @@
     "@testing-library/react": "^16.3.0",
     "@types/geojson": "^7946.0.16",
     "@types/node": "^22.18.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "jsdom": "^26.1.0",
+    "tsup": "^8.5.1",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"

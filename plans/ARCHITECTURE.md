@@ -45,8 +45,9 @@ flowchart LR
     R -->|ephemeral route| S
     R[Routing port / Mapbox Directions]
     D -->|dispatch events| M
-    P --> A[REST snapshot API]
-    C --> E[SSE event stream]
+    P -->|snapshot plus captured stream cursor| A[REST snapshot API]
+    P -->|committed projection_update rows| E[SSE event stream]
+    S -->|active geometry in process memory| A
     A --> W[Operator dashboard]
     E --> W
 ```
@@ -77,7 +78,9 @@ Ownership is explicit rather than represented by a separate event-bus package:
 
 The in-memory adapter validates and takes an immutable transport copy before queuing each publish, so later producer mutation cannot change an accepted record. It delivers each accepted event to all subscribers in call order. A publish resolves after all current subscribers finish. If one or more handlers fail, all handlers are still attempted and the publish rejects explicitly; the failure does not poison later queued events. Unsubscribe is idempotent, stops future publications, and provides deterministic cleanup. These are intentionally documented application semantics, not an attempt to reproduce Kafka consumer groups or acknowledgements.
 
-`FleetProjectionConsumer` is a process-local reference implementation for this initial slice. It assigns backend `receivedAt`, ignores duplicate event IDs, appends accepted records to an in-memory event log, and prevents stale telemetry sequences or route versions from replacing newer projections. The Postgres consumer replaces those collections with an append-and-project transaction without changing the producer contracts or transport boundary.
+`PostgresFleetEventConsumer` is the runtime consumer. It parses every event into its exact canonical shape, assigns backend `receivedAt`, and appends the event plus its current-state and stream projections in one database transaction. `FleetProjectionConsumer` remains a fast process-local reference and test implementation with the same duplicate and stale-event semantics. Neither consumer changes the producer contracts or transport boundary.
+
+SSE never publishes from an uncommitted consumer callback. It reads committed `projection_update` rows, using Postgres notification only as a low-latency wake-up and polling as a fallback. A REST fleet snapshot captures and returns the corresponding stream cursor so the browser can resume without a snapshot-to-stream race.
 
 There is no mature, framework-neutral TypeScript package that provides a drop-in in-memory Kafka broker and is justified for this MVP. Kafka clients such as KafkaJS or `@confluentinc/kafka-javascript` still require a broker. `@nest-native/kafka` includes an in-memory test broker, but it is a pre-1.0 NestJS-specific integration and does not justify selecting NestJS for this project.
 
@@ -87,7 +90,7 @@ This boundary demonstrates the Kafka-relevant application behavior:
 - Vehicle ID is the ordering key, preserving per-vehicle order.
 - Event IDs make consumption idempotent.
 - Per-vehicle sequence numbers prevent older telemetry from overwriting newer state.
-- Events are validated at ingestion and invalid events fail explicitly.
+- Events are parsed at ingestion into an exact canonical envelope and payload; missing or unknown fields fail explicitly.
 - Current-state projections can be rebuilt from the event log.
 
 ## Event Model
@@ -117,10 +120,10 @@ MVP event types are:
 - `route.cancelled`: the active route is no longer valid.
 - `route.completed`: the vehicle has completed the route.
 - `route.assignment-rejected`: the vehicle could not accept a dispatch assignment.
-- `dispatch.assignment-requested`: the dispatcher selected a vehicle and route.
+- `dispatch.assignment-requested`: the dispatcher selected a vehicle and route; it includes the application-owned `commandId` used for command idempotency.
 - `dispatch.assignment-completed`: the correlated route completed.
 
-Route geometry is not repeated in telemetry events or persisted route events. It remains transient working state for the active movement and is discarded on completion. Route events and telemetry have independent timestamps and versions so the UI can distinguish stale vehicle data from stale route data.
+Route geometry is not repeated in telemetry events or persisted route events. Unknown payload properties are rejected, so geometry, distance, duration, provider responses, and provider URLs cannot leak into the event log. Geometry remains transient working state for the active movement and is discarded on completion. Route events and telemetry have independent timestamps and versions so the UI can distinguish stale vehicle data from stale route data.
 
 ### Data semantics
 
@@ -128,8 +131,9 @@ Route geometry is not repeated in telemetry events or persisted route events. It
 - Heading is degrees in the range `[0, 360)`, where `0` is north.
 - Battery percentage is in the range `[0, 100]`.
 - Event timestamps are ISO 8601 UTC timestamps.
-- `sequence` is monotonically increasing per vehicle within a simulator run.
-- The composition root shares one `FleetEventFactory` across simulator and dispatch publishers so their events use one per-vehicle sequence domain. It is not a database version or Kafka offset.
+- `sequence` is monotonically increasing per vehicle across local application restarts.
+- The composition root shares one `FleetEventFactory` across simulator and dispatch publishers so their events use one per-vehicle sequence domain. Before either producer starts, it reads each vehicle's maximum accepted sequence from Postgres and hydrates the factory; consumer subscription also completes before producers start. The sequence is not a database version or Kafka offset.
+- A real external source owns its durable partition and sequence semantics. Multiple producer processes would require a different durable allocator and remain future work.
 - `routeId` identifies a route assignment; `version` increases on route updates.
 - Staleness is based on backend `receivedAt`, not producer clock time.
 
@@ -221,29 +225,31 @@ The dispatch package owns:
 - Correlation of accepted, rejected, completed, and cancelled route events with jobs.
 - Maintaining the configured target of approximately 10 active `EN_ROUTE` assignments.
 
-It depends on abstractions owned by the dispatch package or shared domain package:
+The dispatch package depends on shared domain ports and immutable inputs supplied by the server-side runner:
 
 ```ts
 interface DispatchStrategy {
-  select(context: DispatchContext): DispatchDecision | null;
+  assign(vehicles: readonly DispatchVehicle[], world: WorldCatalogView): DispatchAssignment | undefined;
+}
+
+interface EventPublisher {
+  publish(event: AnyFleetEvent): Promise<void>;
 }
 
 interface FleetStateReader {
-  getDispatchContext(): Promise<DispatchContext>;
-}
-
-interface DispatchJobRepository {
-  tryCreate(decision: DispatchDecision): Promise<DispatchJob | null>;
+  listEligibleVehicles(): Promise<readonly DispatchVehicle[]>;
 }
 
 interface VehicleCommandPort {
-  assignRoute(command: AssignRouteCommand): Promise<void>;
+  assignRoute(command: AssignRouteCommand): Promise<AssignmentResult>;
 }
 ```
 
-`DispatchContext` is an immutable snapshot containing eligible vehicle state, active jobs, service-zone coverage, destinations from the in-memory `WorldCatalog`, and configuration. `DispatchDecision` identifies a vehicle and destination and may include a machine-readable reason. A strategy proposes a decision; the engine remains responsible for job persistence through `DispatchJobRepository`, command idempotency, event publication, and lifecycle handling. The simulator obtains and validates the route while handling the command. `tryCreate` and the database uniqueness constraint resolve races between dispatch cycles.
+The server-side `DispatchRunner` reads fresh vehicle projections and the active-job count, then supplies an immutable candidate snapshot to the engine. A strategy proposes a vehicle and destination; the engine creates application identifiers, publishes the requested job fact, and submits an idempotent command. The Postgres event consumer owns the durable lifecycle projection and the partial unique constraint resolves active-job races. The simulator obtains and validates the route while handling the command.
 
-The MVP uses `RandomDispatchStrategy`. On a configurable interval, the engine compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, and selects a different persisted destination inside the operating area. It creates a job and sends the destination-only command through `VehicleCommandPort`; the simulator obtains the route and checks range. The random generator is seeded so the decision is reproducible; live Mapbox geometry is not expected to be byte-for-byte deterministic. Command rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle.
+The MVP uses `RandomDispatchStrategy`. On a configurable interval, the runner compares active accepted jobs with its target, chooses randomly among `FREE`, fresh, sufficiently charged vehicles without an active job, and selects a different persisted destination inside the operating area. It creates a job and sends the destination-only command through `VehicleCommandPort`; the simulator obtains the route and checks range. The random generator is seeded so the decision is reproducible; live Mapbox geometry is not expected to be byte-for-byte deterministic. Command rejection returns the job to a terminal `REJECTED` state and permits another candidate on a later dispatch cycle. Dispatch pauses when routing is degraded rather than producing an unbounded stream of known-to-fail jobs.
+
+For the single-process MVP, dispatch publishes `dispatch.assignment-requested` and awaits the in-memory publisher, which resolves only after the Postgres consumer transaction commits, before issuing the vehicle command. This removes a database-write/best-effort-publish gap without an outbox. A durable outbox becomes necessary if dispatch job creation and event delivery are later separated across processes.
 
 The job lifecycle is `REQUESTED -> ACCEPTED -> IN_PROGRESS -> COMPLETED`, with `REJECTED`, `CANCELLED`, and `FAILED` alternatives. Job state is distinct from vehicle display status. The strategy is selected by configuration from an explicit registry; dynamic plug-in loading or a generic rules framework is unnecessary for the MVP.
 
@@ -271,7 +277,7 @@ At most one active route record per vehicle, including application route ID, ver
 
 One row per dispatch attempt containing job ID, vehicle ID, route ID and version, strategy name, lifecycle state, decision reason, command ID, correlation ID, and timestamps. A partial unique constraint prevents more than one active job per vehicle. Dispatch-job history supports operator visibility.
 
-The consumer validates an event, appends it to `event_log`, and updates the relevant projection in one database transaction. A duplicate event is acknowledged without changing state. Projection-rebuild code can truncate derived tables and replay the log in event order.
+The consumer parses an event into its canonical shape, appends it to `event_log`, and updates the relevant current-state and `projection_update` records in one database transaction. A duplicate event is acknowledged without changing state. Projection-rebuild code can truncate derived tables and replay the log in database-assigned ingest order.
 
 Database views are reserved for stable domain calculations such as zone coverage. REST response shapes, UI widgets, and ad hoc presentation calculations should not each become database views.
 
@@ -279,13 +285,15 @@ Database views are reserved for stable domain calculations such as zone coverage
 
 Minimum endpoints are:
 
-- `GET /api/vehicles`: current vehicle snapshot, with active route summaries where applicable.
+- `GET /api/vehicles`: a consistent current vehicle snapshot and its captured SSE stream cursor, with active route summaries where applicable.
 - `GET /api/vehicles/:vehicleId`: vehicle details plus active ephemeral route geometry when available.
 - `GET /api/dispatch-jobs`: active and recent dispatch jobs.
 - `GET /api/events`: SSE stream of accepted vehicle, route, and dispatch projection updates.
 - `GET /health`: application and database readiness.
 
-SSE messages include an event ID and only the changed projection. The backend may coalesce updates over a short interval if the simulator runs faster than the browser should render. The browser applies updates to an indexed client-side collection and updates Mapbox data in batches rather than rendering one React/DOM marker per vehicle.
+SSE messages come from committed `projection_update` records, include a resumable stream ID, and contain only the changed projection. The backend may coalesce updates over a short interval if the simulator runs faster than the browser should render. The browser applies updates to an indexed client-side collection and updates Mapbox data in batches rather than rendering one React/DOM marker per vehicle.
+
+The API joins route geometry only from the simulation-owned `ActiveRouteReader` in process memory. No REST or SSE repository reads geometry from Postgres, and missing geometry after a restart is an expected transient state until routing reacquires it.
 
 There are no public mutation endpoints in the MVP.
 
@@ -307,7 +315,8 @@ Staleness must be conspicuous and must not silently present an old location as l
 ## Infrastructure
 
 - TypeScript for simulator, backend, shared event schemas, and frontend.
-- A lightweight Node HTTP framework and schema validation library; framework selection should favor delivery speed and readable code.
+- Fastify with JSON-schema boundary validation for REST and direct response access for SSE.
+- `pg` with explicit parameterized SQL and `node-pg-migrate` versioned migrations; no ORM or PostGIS.
 - React with Mapbox GL JS for basemap rendering, camera controls, and client-side GeoJSON layers in the dashboard.
 - Postgres without PostGIS.
 - Dockerfiles for application services and Docker Compose for reproducible local orchestration.
@@ -322,7 +331,7 @@ The TypeScript workspace is separated by responsibility:
 - `apps/server`: composition root, in-memory event bus, event consumer, Postgres projections, REST, and SSE.
 - `apps/web`: React operator dashboard and the initial Mapbox world-preview spike.
 
-Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. Running them in one server process is an MVP deployment choice, not a domain coupling.
+Package boundaries prevent dispatch from importing simulator state or mutating vehicles directly. The local deployment uses one application container containing the server, simulation and dispatch runtimes, and built React assets, plus one Postgres container; these package boundaries remain valid despite the single-process MVP topology.
 
 Mapbox has two explicit integration points. Mapbox GL JS renders a Mapbox-hosted basemap plus application-owned GeoJSON sources for the operating polygon, service zones, destinations, vehicles, headings, and active routes. Separately, the simulation package's server-side `RoutingPort` adapter calls Mapbox Directions once per attempted movement and keeps the response only as active in-memory working state. The database never persists Directions results. See `plans/MAPBOX_INTEGRATION.md` for the complete inventory and fallback behavior.
 

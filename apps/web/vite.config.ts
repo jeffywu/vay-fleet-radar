@@ -7,6 +7,7 @@ const repositoryRoot = fileURLToPath(new URL("../..", import.meta.url));
 export default defineConfig(({ mode }) => {
   const environment = loadEnv(mode, repositoryRoot, "");
   const browserToken = environment.VITE_MAPBOX_ACCESS_TOKEN || environment.MAPBOX_TOKEN || "";
+  const apiProxyTarget = environment.VITE_API_PROXY_TARGET || "http://127.0.0.1:3000";
   if (browserToken && !browserToken.startsWith("pk.")) {
     throw new Error("The browser map requires a public Mapbox token beginning with pk.; never expose a secret token through Vite");
   }
@@ -18,6 +19,10 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       fs: { allow: [repositoryRoot] },
+      proxy: {
+        "/api": { target: apiProxyTarget },
+        "/health": { target: apiProxyTarget },
+      },
     },
   };
 });

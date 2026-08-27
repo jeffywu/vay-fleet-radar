@@ -120,7 +120,7 @@ export class SimulationEngine implements VehicleCommandPort {
     vehicle.pendingMovement = undefined;
     vehicle.activeMovement = movement;
     vehicle.status = "EN_ROUTE";
-    this.latestRouteVersion.set(vehicle.id, command.routeVersion);
+    this.latestRouteVersion.set(command.routeId, command.routeVersion);
     this.activeRoutes.set({ routeId: command.routeId, vehicleId: vehicle.id, routeVersion: command.routeVersion,
       destinationId: destination.id, purpose: "DISPATCH", geometry: route.geometry });
     const result = { accepted: true, routeId: command.routeId, routeVersion: command.routeVersion } as const;
@@ -267,7 +267,7 @@ export class SimulationEngine implements VehicleCommandPort {
     const vehicle = this.vehicles.get(command.vehicleId);
     if (!vehicle) return "UNKNOWN_VEHICLE";
     if (!this.options.world.getDestination(command.destinationId)) return "UNKNOWN_DESTINATION";
-    if (command.routeVersion <= (this.latestRouteVersion.get(vehicle.id) ?? 0)) return "STALE_ROUTE_VERSION";
+    if (command.routeVersion <= (this.latestRouteVersion.get(command.routeId) ?? 0)) return "STALE_ROUTE_VERSION";
     if (vehicle.pendingMovement) return "ROUTE_PENDING";
     if (vehicle.status !== "FREE" || vehicle.activeMovement) return "VEHICLE_BUSY";
     if (vehicle.rechargeUntilSimulatedMs !== undefined) return "RECHARGING";

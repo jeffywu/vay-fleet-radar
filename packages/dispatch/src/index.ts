@@ -46,17 +46,19 @@ export class DispatchEngine {
     private readonly commands: VehicleCommandPort,
     private readonly events: DispatchEventEmitter,
     private readonly strategyName = "random",
+    private readonly createSuffix?: () => string,
   ) {}
 
   async assignOne(vehicles: readonly DispatchVehicle[], world: WorldCatalogView): Promise<AssignmentResult | undefined> {
     const assignment = this.strategy.assign(vehicles, world);
     if (!assignment) return undefined;
-    const suffix = String(++this.sequence).padStart(6, "0");
+    const suffix = this.createSuffix?.() ?? String(++this.sequence).padStart(6, "0");
     const dispatchJobId = `dispatch-${suffix}`;
     const routeId = `route-${suffix}`;
-    await this.events.publishAssignmentRequested({ dispatchJobId, vehicleId: assignment.vehicle.id, routeId,
+    const commandId = `assign-${suffix}`;
+    await this.events.publishAssignmentRequested({ dispatchJobId, commandId, vehicleId: assignment.vehicle.id, routeId,
       routeVersion: 1, destinationId: assignment.destination.id, strategy: this.strategyName });
-    return this.commands.assignRoute({ commandId: `assign-${suffix}`, dispatchJobId, vehicleId: assignment.vehicle.id,
+    return this.commands.assignRoute({ commandId, dispatchJobId, vehicleId: assignment.vehicle.id,
       routeId, routeVersion: 1, destinationId: assignment.destination.id });
   }
 }
@@ -70,6 +72,7 @@ export class DispatchEventEmitter {
 
   publishAssignmentRequested(input: {
     dispatchJobId: string;
+    commandId: string;
     vehicleId: string;
     routeId: string;
     routeVersion: number;
@@ -83,6 +86,7 @@ export class DispatchEventEmitter {
       correlationId: input.dispatchJobId,
       payload: {
         dispatchJobId: input.dispatchJobId,
+        commandId: input.commandId,
         routeId: input.routeId,
         routeVersion: input.routeVersion,
         destinationId: input.destinationId,

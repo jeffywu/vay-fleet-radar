@@ -35,7 +35,8 @@ describe("RandomDispatchStrategy", () => {
       new DispatchEventEmitter(publisher, new SequencedFleetEventFactory()), "random");
     await engine.assignOne([{ id: "vehicle-1", coordinate: [-115.2, 36.1], batteryPercentage: 80, status: "FREE",
       currentDestinationId: world.destinations[0].id }], world);
-    expect(commands.assignRoute).toHaveBeenCalledWith(expect.objectContaining({ vehicleId: "vehicle-1", destinationId: world.destinations[1].id }));
+    expect(commands.assignRoute).toHaveBeenCalledWith(expect.objectContaining({ commandId: "assign-000001", vehicleId: "vehicle-1", destinationId: world.destinations[1].id }));
+    expect(publisher.publish).toHaveBeenCalledWith(expect.objectContaining({ payload: expect.objectContaining({ commandId: "assign-000001" }) }));
     expect(JSON.stringify(vi.mocked(commands.assignRoute).mock.calls)).not.toContain("geometry");
   });
 });

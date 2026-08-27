@@ -4,12 +4,22 @@
   "type": "module",
   "exports": "./src/index.ts",
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "npm run typecheck && tsup",
+    "db:migrate": "node-pg-migrate --migrations-dir ../../db/migrations --database-url-var DATABASE_URL up",
+    "db:migrate:down": "node-pg-migrate --migrations-dir ../../db/migrations --database-url-var DATABASE_URL down",
+    "db:rebuild-projections": "tsx src/database/rebuildProjections.ts",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@fastify/static": "^10.1.3",
     "@fleet-radar/dispatch": "*",
     "@fleet-radar/domain": "*",
     "@fleet-radar/simulation": "*",
-    "@fleet-radar/world": "*"
+    "@fleet-radar/world": "*",
+    "fastify": "^5.12.1",
+    "node-pg-migrate": "^9.0.0",
+    "pg": "^8.23.0"
   }
 }

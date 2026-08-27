@@ -1,5 +1,5 @@
 import type { AnyFleetEvent, EventPublisher, EventSource, FleetEventHandler, Unsubscribe } from "@fleet-radar/domain/events";
-import { validateFleetEvent } from "@fleet-radar/domain/events";
+import { parseFleetEvent } from "@fleet-radar/domain/events";
 
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
@@ -30,10 +30,10 @@ export class InMemoryEventBus implements EventPublisher, EventSource {
   }
 
   publish(event: AnyFleetEvent): Promise<void> {
-    validateFleetEvent(event);
+    const parsed = parseFleetEvent(event);
     // Mimic a serialization boundary so later producer mutations cannot change
     // a record that the transport has already accepted.
-    const acceptedEvent = deepFreeze(structuredClone(event));
+    const acceptedEvent = deepFreeze(structuredClone(parsed));
     // Capture subscribers at publish time. Unsubscribing stops later publishes,
     // while records already accepted by the bus are still delivered.
     const subscribers = [...this.subscribers.values()];

@@ -1,0 +1,72 @@
+name: fleet-radar
+
+x-database-environment: &database-environment
+  POSTGRES_DB: ${POSTGRES_DB:-fleet_radar}
+  POSTGRES_USER: ${POSTGRES_USER:-fleet_radar}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-replace-local-password}
+
+x-application-environment: &application-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-fleet_radar}:${POSTGRES_PASSWORD:-replace-local-password}@postgres:5432/${POSTGRES_DB:-fleet_radar}
+  MAPBOX_DIRECTIONS_ACCESS_TOKEN: ${MAPBOX_DIRECTIONS_ACCESS_TOKEN:-}
+  ROUTING_MAX_REQUESTS_PER_RUN: ${ROUTING_MAX_REQUESTS_PER_RUN:-5000}
+  STALE_AFTER_SECONDS: ${STALE_AFTER_SECONDS:-10}
+  DISPATCH_TARGET_ACTIVE: ${DISPATCH_TARGET_ACTIVE:-10}
+  DISPATCH_INTERVAL_MS: ${DISPATCH_INTERVAL_MS:-5000}
+  DISPATCH_MAX_PER_CYCLE: ${DISPATCH_MAX_PER_CYCLE:-2}
+  SSE_RETENTION_ROWS: ${SSE_RETENTION_ROWS:-10000}
+  SSE_RETENTION_HOURS: ${SSE_RETENTION_HOURS:-24}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+x-application-image: &application-image
+  image: fleet-radar-app:local
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment: *database-environment
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  migrate:
+    <<: *application-image
+    environment: *application-environment
+    command: ["npm", "run", "db:migrate"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  app:
+    <<: *application-image
+    build:
+      context: .
+      args:
+        VITE_MAPBOX_ACCESS_TOKEN: ${VITE_MAPBOX_ACCESS_TOKEN:-}
+    environment:
+      <<: *application-environment
+      APP_PORT: ${APP_PORT:-3000}
+    ports:
+      - "${APP_PORT:-3000}:${APP_PORT:-3000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:' + process.env.APP_PORT + '/health').then((response) => { if (!response.ok) process.exit(1); }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    stop_grace_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

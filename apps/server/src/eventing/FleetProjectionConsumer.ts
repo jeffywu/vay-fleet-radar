@@ -5,7 +5,7 @@ import type {
   Unsubscribe,
   VehicleStatus,
 } from "@fleet-radar/domain/events";
-import { validateFleetEvent } from "@fleet-radar/domain/events";
+import { parseFleetEvent } from "@fleet-radar/domain/events";
 
 export type VehicleProjection = {
   readonly vehicleId: string;
@@ -29,6 +29,7 @@ export type RouteProjection = {
 
 export type DispatchProjection = {
   readonly dispatchJobId: string;
+  readonly commandId?: string;
   readonly vehicleId: string;
   readonly routeId: string;
   readonly routeVersion: number;
@@ -64,11 +65,11 @@ export class FleetProjectionConsumer {
   }
 
   async consume(event: AnyFleetEvent): Promise<void> {
-    validateFleetEvent(event);
-    if (this.acceptedEventIds.has(event.eventId)) return;
+    const parsed = parseFleetEvent(event);
+    if (this.acceptedEventIds.has(parsed.eventId)) return;
 
     const receivedAt = this.now().toISOString();
-    const received = { ...event, receivedAt } as ReceivedFleetEvent;
+    const received = { ...parsed, receivedAt } as ReceivedFleetEvent;
     this.events.push(received);
     this.acceptedEventIds.add(event.eventId);
     this.project(received);
@@ -135,6 +136,7 @@ export class FleetProjectionConsumer {
       case "dispatch.assignment-requested":
         this.dispatchJobs.set(event.payload.dispatchJobId, {
           dispatchJobId: event.payload.dispatchJobId,
+          commandId: event.payload.commandId,
           vehicleId: event.vehicleId,
           routeId: event.payload.routeId,
           routeVersion: event.payload.routeVersion,
@@ -148,6 +150,7 @@ export class FleetProjectionConsumer {
         const current = this.dispatchJobs.get(event.payload.dispatchJobId);
         this.dispatchJobs.set(event.payload.dispatchJobId, {
           dispatchJobId: event.payload.dispatchJobId,
+          ...(current?.commandId === undefined ? {} : { commandId: current.commandId }),
           vehicleId: event.vehicleId,
           routeId: event.payload.routeId,
           routeVersion: event.payload.routeVersion,

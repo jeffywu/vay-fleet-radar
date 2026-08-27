@@ -37,6 +37,7 @@ export type FleetEventPayloads = {
   };
   "dispatch.assignment-requested": {
     readonly dispatchJobId: string;
+    readonly commandId: string;
     readonly routeId: string;
     readonly routeVersion: number;
     readonly destinationId: string;
@@ -57,7 +58,7 @@ export type FleetEvent<TType extends FleetEventType = FleetEventType> = {
   readonly eventType: TType;
   readonly schemaVersion: 1;
   readonly vehicleId: string;
-  /** Monotonically increasing for a vehicle within one producer run. */
+  /** Monotonically increasing for a vehicle across local application restarts. */
   readonly sequence: number;
   /** Producer time in ISO 8601 UTC. It is not used to determine freshness. */
   readonly occurredAt: string;
