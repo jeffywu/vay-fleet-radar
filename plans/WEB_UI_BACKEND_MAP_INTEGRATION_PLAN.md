@@ -483,4 +483,12 @@ After implementation:
 
 ## Next Interactive UI Candidates
 
-After this plan is complete, choose the next dashboard addition through discussion rather than implementing all of them at once. Candidates include selected-vehicle detail, active route overlay, status/battery/stale filters, dispatch-job visibility, zone coverage, and operator intervention workflows.
+After this plan is complete, choose the next dashboard addition through discussion rather than implementing all of them at once. Candidates include selected-vehicle detail, stale filtering, dispatch-job visibility, zone coverage, and operator intervention workflows.
+
+### Completed follow-up: status and battery filters
+
+The first post-spike dashboard increment adds client-side status checkboxes and a combinable battery-below-20% filter beneath the map legend. Filtering affects only the Mapbox vehicle source; the complete snapshot and real-time feed remain resident in the browser so hidden vehicles continue receiving updates.
+
+### Completed follow-up: active route and destination overlays
+
+The next increment retains active-route summaries from snapshots and named route SSE events, fetches ephemeral geometry from the vehicle detail endpoint when a route appears, and renders all visible `EN_ROUTE` paths in one GeoJSON line source. A separate point source places the persisted catalog destination and name at each route endpoint. Route removals clear both overlays, and client-side vehicle filters apply to the vehicle, route, and destination sources together.

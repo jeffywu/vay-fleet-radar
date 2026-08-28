@@ -1,3 +1,5 @@
+import type { LineString } from "geojson";
+
 export const vehicleStatuses = ["FREE", "WITH_CUSTOMER", "EN_ROUTE"] as const;
 
 export type VehicleStatus = (typeof vehicleStatuses)[number];
@@ -11,7 +13,19 @@ export type VehicleMapRecord = {
   serviceZoneId: string;
   lastOccurredAt: string;
   lastReceivedAt: string;
+  activeRoute?: ActiveRouteMapRecord;
 };
+
+export type ActiveRouteMapRecord = {
+  routeId: string;
+  version: number;
+  destinationId: string;
+  state: "ACCEPTED" | "IN_PROGRESS";
+  geometryAvailable: boolean;
+  geometry?: LineString;
+};
+
+export type RouteUpdate = ActiveRouteMapRecord & { vehicleId: string };
 
 export type FleetSnapshot = {
   data: VehicleMapRecord[];
@@ -35,6 +49,7 @@ export function parseVehicleMapRecord(input: unknown): VehicleMapRecord {
   const latitude = boundedNumber(coordinate[1], "latitude", -90, 90);
   const status = nonEmptyString(value.status, "status");
   if (!statuses.has(status)) fail("status");
+  const activeRoute = value.activeRoute === undefined ? undefined : parseActiveRoute(value.activeRoute);
   return {
     vehicleId: nonEmptyString(value.vehicleId, "vehicleId"),
     coordinate: [longitude, latitude],
@@ -44,7 +59,22 @@ export function parseVehicleMapRecord(input: unknown): VehicleMapRecord {
     serviceZoneId: nonEmptyString(value.serviceZoneId, "serviceZoneId"),
     lastOccurredAt: timestamp(value.lastOccurredAt, "lastOccurredAt"),
     lastReceivedAt: timestamp(value.lastReceivedAt, "lastReceivedAt"),
+    ...(activeRoute ? { activeRoute } : {}),
   };
+}
+
+export function parseVehicleDetail(input: unknown): VehicleMapRecord {
+  return parseVehicleMapRecord(record(input, "vehicle detail").data);
+}
+
+export function parseRouteUpdate(input: unknown): RouteUpdate {
+  const value = record(input, "route update");
+  return { vehicleId: nonEmptyString(value.vehicleId, "vehicleId"), ...parseActiveRoute(value) };
+}
+
+export function parseRouteRemoval(input: unknown): { vehicleId: string; routeId: string } {
+  const value = record(input, "route removal");
+  return { vehicleId: nonEmptyString(value.vehicleId, "vehicleId"), routeId: nonEmptyString(value.routeId, "routeId") };
 }
 
 export function parseFleetSnapshot(input: unknown): FleetSnapshot {
@@ -70,6 +100,34 @@ export function parseFleetSnapshot(input: unknown): FleetSnapshot {
 function record(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`Invalid ${label}`);
   return value as Record<string, unknown>;
+}
+
+function parseActiveRoute(input: unknown): ActiveRouteMapRecord {
+  const value = record(input, "active route");
+  const state = nonEmptyString(value.state, "route state");
+  if (state !== "ACCEPTED" && state !== "IN_PROGRESS") fail("route state");
+  if (typeof value.geometryAvailable !== "boolean") fail("geometryAvailable");
+  const geometry = value.geometry === undefined ? undefined : lineString(value.geometry);
+  if (value.geometryAvailable !== Boolean(geometry)) fail("route geometry availability");
+  return {
+    routeId: nonEmptyString(value.routeId, "routeId"),
+    version: integer(value.version, "route version", 1),
+    destinationId: nonEmptyString(value.destinationId, "destinationId"),
+    state,
+    geometryAvailable: value.geometryAvailable,
+    ...(geometry ? { geometry } : {}),
+  };
+}
+
+function lineString(input: unknown): LineString {
+  const value = record(input, "route geometry");
+  if (value.type !== "LineString" || !Array.isArray(value.coordinates) || value.coordinates.length < 2 || value.coordinates.length > 20_000)
+    fail("route geometry");
+  return { type: "LineString", coordinates: value.coordinates.map((coordinate) => {
+    if (!Array.isArray(coordinate) || coordinate.length !== 2) fail("route coordinate");
+    return [boundedNumber(coordinate[0], "route longitude", -180, 180),
+      boundedNumber(coordinate[1], "route latitude", -90, 90)];
+  }) };
 }
 
 function nonEmptyString(value: unknown, name: string): string {

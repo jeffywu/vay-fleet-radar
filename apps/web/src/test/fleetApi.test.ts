@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createFleetEventSource, fetchFleetSnapshot } from "../api/fleetApi.ts";
+import { createFleetEventSource, fetchFleetSnapshot, fetchVehicleDetail } from "../api/fleetApi.ts";
 
 const validSnapshot = { data: [], meta: { count: 0, generatedAt: "2026-01-01T00:00:00.000Z", streamCursor: "7", staleAfterSeconds: 30 } };
 
@@ -30,5 +30,19 @@ describe("fleetApi", () => {
     vi.stubGlobal("EventSource", constructor);
     expect(createFleetEventSource("9007199254740993")).toBe(eventSource);
     expect(constructor).toHaveBeenCalledWith("/api/events?after=9007199254740993");
+  });
+
+  it("loads active route detail from the same-origin vehicle endpoint", async () => {
+    const controller = new AbortController();
+    const detail = { ...validSnapshot, data: { vehicleId: "vehicle-1", coordinate: [-115.17, 36.12], heading: 90,
+      batteryPercentage: 50, status: "EN_ROUTE", serviceZoneId: "zone-c", lastOccurredAt: "2026-01-01T00:00:00.000Z",
+      lastReceivedAt: "2026-01-01T00:00:01.000Z", activeRoute: { routeId: "route-1", version: 1,
+        destinationId: "dst-1", state: "ACCEPTED", geometryAvailable: true,
+        geometry: { type: "LineString", coordinates: [[-115.17, 36.12], [-115.1, 36.2]] } } } };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(detail), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchVehicleDetail("vehicle/1", controller.signal)).resolves.toMatchObject({ vehicleId: "vehicle-1" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/vehicles/vehicle%2F1",
+      { signal: controller.signal, headers: { Accept: "application/json" } });
   });
 });

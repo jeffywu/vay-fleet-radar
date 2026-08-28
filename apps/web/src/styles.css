@@ -12,6 +12,17 @@ button { font: inherit; }
 .section-label { margin: 0 0 12px; }
 .status-legend { display: flex; flex-direction: column; gap: 12px; }
 .status-legend span { align-items: center; color: #a7b6c9; display: flex; font-size: 12px; gap: 9px; }
+.route-legend { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.route-legend span { align-items: center; color: #a7b6c9; display: flex; font-size: 12px; gap: 9px; }
+.route-key { border-top: 3px solid #f97316; box-shadow: 0 -1px #fff7ed; display: inline-block; width: 14px; }
+.destination-key { background: #fff7ed; border: 2px solid #c2410c; border-radius: 50%; display: inline-block; height: 11px; width: 11px; }
+.filter-divider { border-top: 1px solid #1e293b; margin: 20px 0; }
+.vehicle-filters { display: flex; flex-direction: column; gap: 15px; }
+.vehicle-filters fieldset { border: 0; display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; }
+.vehicle-filters legend { color: #71839a; font-size: 10px; font-weight: 700; margin-bottom: 8px; }
+.vehicle-filters label { align-items: center; color: #a7b6c9; cursor: pointer; display: flex; font-size: 12px; gap: 8px; }
+.vehicle-filters input { accent-color: #0891b2; height: 14px; margin: 0; width: 14px; }
+.filter-count { color: #64748b; font-size: 10px; margin: 0; }
 .vehicle-key { background: #64748b; border: 1px solid #f8fafc; border-radius: 50%; display: inline-block; height: 11px; width: 11px; }
 .vehicle-key--free { background: #14b8a6; }
 .vehicle-key--customer { background: #2563eb; }
@@ -43,5 +54,9 @@ button { font: inherit; }
   .sidebar section { border: 0; padding: 0; }
   .sidebar footer { display: none; }
   .status-legend { display: grid; gap: 7px; grid-template-columns: 1fr 1fr; }
+  .route-legend { display: grid; gap: 7px; grid-template-columns: 1fr 1fr; margin-top: 10px; }
+  .filter-divider { margin: 12px 0; }
+  .vehicle-filters { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+  .filter-count { grid-column: 1 / -1; }
   .backend-error { left: 10px; max-width: none; right: 10px; top: 58px; }
 }

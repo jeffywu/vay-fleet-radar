@@ -215,7 +215,8 @@ Use style layers rather than one HTML `Marker` per vehicle. Vehicle updates shou
 | `service-zones` | Polygon collection | Coverage/health overlay |
 | `destinations` | Point collection | Optional destination nodes |
 | `vehicles` | Point collection | Vehicle symbol, heading, status, stale state, selection |
-| `active-routes` | LineString collection | Selected route by default; optionally all active routes |
+| `active-routes` | LineString collection | Ephemeral geometry for all visible `EN_ROUTE` vehicles |
+| `route-destinations` | Point collection | Named final destination for each visible active route |
 
 ### Server: Mapbox Directions
 

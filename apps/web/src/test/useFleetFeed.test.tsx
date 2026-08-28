@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FleetSnapshot } from "../api/contracts.ts";
+import type { FleetSnapshot, VehicleMapRecord } from "../api/contracts.ts";
 import type { FleetEventSource } from "../api/fleetApi.ts";
 import { useFleetFeed } from "../hooks/useFleetFeed.ts";
 
-const vehicle = (id: string, heading = 10) => ({ vehicleId: id, coordinate: [-115.17, 36.12] as [number, number], heading,
-  batteryPercentage: 70, status: "FREE" as const, serviceZoneId: "zone-c", lastOccurredAt: "2026-01-01T00:00:00.000Z",
+const vehicle = (id: string, heading = 10): VehicleMapRecord => ({ vehicleId: id, coordinate: [-115.17, 36.12], heading,
+  batteryPercentage: 70, status: "FREE", serviceZoneId: "zone-c", lastOccurredAt: "2026-01-01T00:00:00.000Z",
   lastReceivedAt: "2026-01-01T00:00:01.000Z" });
 const snapshot = (cursor: string, data = [vehicle("vehicle-1")]): FleetSnapshot => ({ data, meta: { count: data.length,
   generatedAt: "2026-01-01T00:00:02.000Z", streamCursor: cursor, staleAfterSeconds: 30 } });
@@ -39,7 +39,8 @@ describe("useFleetFeed", () => {
     const { result, unmount } = renderHook(() => useFleetFeed({ fetchSnapshot, createEventSource }));
     await waitFor(() => expect(createEventSource).toHaveBeenCalledWith("9007199254740993"));
     expect(result.current.vehicles).toEqual([vehicle("vehicle-1")]);
-    expect([...source.listeners.keys()]).toEqual(expect.arrayContaining(["open", "error", "vehicle.updated", "stream.reset-required"]));
+    expect([...source.listeners.keys()]).toEqual(expect.arrayContaining(
+      ["open", "error", "vehicle.updated", "route.updated", "route.removed", "stream.reset-required"]));
     act(() => source.emit("open"));
     expect(result.current.connectionState).toBe("LIVE");
     unmount();
@@ -97,6 +98,27 @@ describe("useFleetFeed", () => {
     expect(result.current.vehicles).toHaveLength(1);
     expect(warning).toHaveBeenCalledWith("Ignored malformed vehicle update from fleet stream");
     warning.mockRestore();
+    unmount();
+  });
+
+  it("hydrates active route geometry and removes it when the route completes", async () => {
+    const source = new MockSource();
+    const activeRoute = { routeId: "route-1", version: 1, destinationId: "dst-1", state: "ACCEPTED" as const,
+      geometryAvailable: false };
+    const routedVehicle = { ...vehicle("vehicle-1"), status: "EN_ROUTE" as const, activeRoute };
+    const geometry = { type: "LineString" as const, coordinates: [[-115.17, 36.12], [-115.1, 36.2]] };
+    const fetchDetail = vi.fn().mockResolvedValue({ ...routedVehicle,
+      activeRoute: { ...activeRoute, geometryAvailable: true, geometry } });
+    const { result, unmount } = renderHook(() => useFleetFeed({ fetchSnapshot: vi.fn().mockResolvedValue(snapshot("8", [routedVehicle])),
+      fetchDetail, createEventSource: () => source }));
+    await waitFor(() => expect(fetchDetail).toHaveBeenCalledWith("vehicle-1", expect.any(AbortSignal)));
+    await waitFor(() => expect(frames.length).toBeGreaterThan(0));
+    act(() => frames.splice(0).forEach((frame, index) => frame(index)));
+    expect(result.current.vehicles[0]?.activeRoute?.geometry).toEqual(geometry);
+
+    act(() => source.emit("route.removed", { vehicleId: "vehicle-1", routeId: "route-1" }));
+    act(() => frames.splice(0).forEach((frame, index) => frame(index)));
+    expect(result.current.vehicles[0]?.activeRoute).toBeUndefined();
     unmount();
   });
 

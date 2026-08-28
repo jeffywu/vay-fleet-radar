@@ -1,16 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { parseFleetSnapshot, parseVehicleMapRecord } from "../api/contracts.ts";
+import { parseFleetSnapshot, parseRouteRemoval, parseRouteUpdate, parseVehicleDetail, parseVehicleMapRecord } from "../api/contracts.ts";
 
 const vehicle = { vehicleId: "vehicle-0001", coordinate: [-115.17, 36.12], heading: 90, batteryPercentage: 72,
   status: "FREE", serviceZoneId: "zone-c", lastOccurredAt: "2026-01-01T00:00:00.000Z", lastReceivedAt: "2026-01-01T00:00:01.000Z" };
+const activeRoute = { routeId: "route-1", version: 1, destinationId: "dst-1", state: "ACCEPTED", geometryAvailable: false };
 
 describe("fleet API contracts", () => {
-  it("returns canonical browser-owned snapshot records", () => {
-    const parsed = parseFleetSnapshot({ data: [{ ...vehicle, isStale: false, activeRoute: { routeId: "ignored" } }],
+  it("returns canonical browser-owned snapshot records including active route summaries", () => {
+    const parsed = parseFleetSnapshot({ data: [{ ...vehicle, status: "EN_ROUTE", isStale: false, activeRoute }],
       meta: { count: 1, generatedAt: "2026-01-01T00:00:02.000Z", streamCursor: "9007199254740993", staleAfterSeconds: 12 }, ignored: true });
-    expect(parsed.data).toEqual([vehicle]);
+    expect(parsed.data).toEqual([{ ...vehicle, status: "EN_ROUTE", activeRoute }]);
     expect(parsed.meta.streamCursor).toBe("9007199254740993");
-    expect(parsed.data[0]).not.toHaveProperty("activeRoute");
+  });
+
+  it("validates route stream records and detail geometry", () => {
+    expect(parseRouteUpdate({ vehicleId: vehicle.vehicleId, ...activeRoute, updatedAt: "ignored" }))
+      .toEqual({ vehicleId: vehicle.vehicleId, ...activeRoute });
+    expect(parseRouteRemoval({ vehicleId: vehicle.vehicleId, routeId: activeRoute.routeId }))
+      .toEqual({ vehicleId: vehicle.vehicleId, routeId: activeRoute.routeId });
+    const geometry = { type: "LineString", coordinates: [[-115.17, 36.12], [-115.1, 36.2]] };
+    expect(parseVehicleDetail({ data: { ...vehicle, status: "EN_ROUTE",
+      activeRoute: { ...activeRoute, geometryAvailable: true, geometry } } }).activeRoute?.geometry).toEqual(geometry);
+  });
+
+  it("rejects inconsistent or invalid active route geometry", () => {
+    expect(() => parseVehicleMapRecord({ ...vehicle, activeRoute: { ...activeRoute, geometryAvailable: true } }))
+      .toThrow("Invalid fleet data");
+    expect(() => parseRouteUpdate({ vehicleId: vehicle.vehicleId, ...activeRoute,
+      geometryAvailable: true, geometry: { type: "LineString", coordinates: [[500, 36], [-115, 36]] } }))
+      .toThrow("Invalid fleet data");
   });
 
   it.each([

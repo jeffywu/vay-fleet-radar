@@ -2,7 +2,7 @@
   "seed": "vay-simulation-v1",
   "vehicleCount": 100,
   "tickIntervalMs": 1000,
-  "timeMultiplier": 1,
+  "timeMultiplier": 10,
   "maximumAdvanceMs": 5000,
   "customerTripProbabilityPerSimulatedMinute": 0.025,
   "minimumFreeDwellSeconds": 30,

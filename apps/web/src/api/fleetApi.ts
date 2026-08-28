@@ -1,4 +1,4 @@
-import { parseFleetSnapshot, type FleetSnapshot } from "./contracts.ts";
+import { parseFleetSnapshot, parseVehicleDetail, type FleetSnapshot, type VehicleMapRecord } from "./contracts.ts";
 
 export type FleetEventSource = {
   addEventListener(type: string, listener: (event: Event | MessageEvent) => void): void;
@@ -19,6 +19,21 @@ export async function fetchFleetSnapshot(signal: AbortSignal): Promise<FleetSnap
   try { input = await response.json(); }
   catch { throw new Error("The fleet backend returned an invalid response"); }
   return parseFleetSnapshot(input);
+}
+
+export async function fetchVehicleDetail(vehicleId: string, signal: AbortSignal): Promise<VehicleMapRecord> {
+  let response: Response;
+  try {
+    response = await fetch(`/api/vehicles/${encodeURIComponent(vehicleId)}`, { signal, headers: { Accept: "application/json" } });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new Error("The active route could not be loaded");
+  }
+  if (!response.ok) throw new Error("The active route could not be loaded");
+  let input: unknown;
+  try { input = await response.json(); }
+  catch { throw new Error("The vehicle backend returned an invalid response"); }
+  return parseVehicleDetail(input);
 }
 
 export const createFleetEventSource: FleetEventSourceFactory = (cursor) =>
