@@ -1,6 +1,6 @@
 # Fleet Radar
 
-Fleet Radar is a local operational fleet simulation for the Las Vegas service area. The composed application runs Postgres, applies migrations, starts the REST/SSE backend and simulation runtime, and serves the built React dashboard from one application container.
+Fleet Radar is a local operational fleet simulation for the Las Vegas service area.
 
 ## Run locally with Docker
 
@@ -9,6 +9,7 @@ Requirements: Docker with Compose v2 and an available local port 3000. MAPBOX_AC
 Starting the simulation:
 
 ```sh
+npm install
 cp .env.example .env
 docker compose up --build --wait
 ```
@@ -25,6 +26,20 @@ docker compose down
 
 ## Architecture
 
+The application is split between a simulated external fleet and the Fleet Radar system itself. The simulator is intentionally treated as a black box: Fleet Radar observes vehicle state through events rather than directly accessing simulator state.
+
+Data flow
+
+Simulation → simulated Kafka event stream → server state projection/Postgres → SSE → React UI
+
+Dispatch commands flow in the opposite direction:
+
+Dispatch → simulation command → simulation → telemetry/route events
+
+This mirrors a production architecture where vehicle and operational systems publish events to Kafka and Fleet Radar builds a read-optimized representation of current fleet state from those events.
+
+### Simulation
+
 packages/world: a set of scripts to extract 200 real world destinations within a rectangular bounding box from MapBox. The service area and destinations are exported as static assets in assets/world and loaded in memory by the application.
 
 packages/simulation: a simulation engine that manages an internal state of the world and emits telemetry events. Should be treated as a "black box" by the Fleet Radar application. The simulation is configured by config/simulation.json. The possible state transitions for each car are:
@@ -39,10 +54,10 @@ packages/simulation: a simulation engine that manages an internal state of the w
 
 These systems below would be considered part of a Vay Fleet Radar MVP:
 
-- packages/domain: simulates a Kafka event stream and manages the event schema
-- packages/dispatch: a simple dispatch engine that puts car into the EN_ROUTE to a random destination by sending an event into the simulation engine.
+- packages/domain: defines the shared domain event schema
+- packages/dispatch: a minimal command-producing dispatch service. It assigns a free vehicle to a destination and sends a dispatch command to the simulator. The simulator then emits the resulting route and telemetry events.
 - apps/server: runs all the services in a single typescript application, including the Web API, simulated Kafka event stream, the simulation engine and the dispatch service.
-- apps/web: React UI that uses MapBox to display the map
+- apps/web: React UI that uses MapBox to display the map, vehicle state is streamed over SSE
 
 ### Documentation
 
@@ -50,37 +65,30 @@ All architecture and AI generated execution plans are in plans/. The Codex discu
 
 ## Trade Offs
 
-The scope of the assignment, the time limitation, and my own unfamiliarity with the MapBox API meant that I had to rely heavily on AI code generation in order to complete the task. The quality of the code, the cleanliness of the abstractions and the UX for the fleet operator are not as good as I would like. If given more time I would improve the following:
+Given the scope and timebox requirement, I favored demonstrating the end to end data flow over production or visual polish. I directed the architectural decision, but I used AI-assisted development extensively to fit the scope into the timebox.
 
-- Split the simulation engine, dispatch engine, REST API into separate applications to ensure a cleaner dependency chain.
-- Spend more time on the backend data structures, matching data structures with desired metrics and potentially using different data stores like time series databases, PostGIS to generate more sophisticated measures.
-- Define a clear data dictionary including the semantic meaning of every event, field and calculated metric.
-- Build a more full fledged dashboard which includes more metrics around revenue generation, car and teledriver utilization, as well as the ability to dispatch events. I would focus on building the dashboard from a user story perspective and map each feature to a specific use case that a fleet operator requires.
-- Deploy the application to a cloud service so it does not have to be run locally.
+- Single process backend: the simulation engine, dispatch engine, and API all run inside a single application. This was done to speed up implementation but in production these would be separate applications.
+- Dispatch engine: was intentionally kept simple but this was important to demonstrate a realistic event lifecycle.
+- Limited operator UX: given the focus on data flows, I intentionally kept the UI simple enough to clearly demonstrate basic operator features.
+- Data model and persistence: the Postgres data model was kept simple, but in a production system a data model would be carefully designed along with specialized storage requirements for geospatial, time series and performance considerations.
+
+Given more time, I would focus first on improving the operator workflows and data model: defining a canonical fleet data dictionary, adding clearer operational metrics, and validating the UI against concrete operator use cases.
 
 ## Scaling to 1,000 Vehicles
 
-Scaling this application would depend on the goals. If the goal is create a simulation environment for the fleet in order to test various assumptions, I would focus on:
+1,000 vehicles is not particularly challenging from a raw throughput perspective. Even at one telemetry event per vehicle per second, the system only processes roughly 1,000 events/sec. The more important scaling concerns are whether the business trust the information that it is given, whether the system can adjust to rapidly changing requirements, and whether multiple engineering teams can quickly and reliably ship new features.
 
-    - making the destination list more realistic, maybe pulled from real historic data
-    - applying realistic teledriver restrictions like no unprotected left turns
-    - using the more restrictive service area map
-    - using realistic historic traffic information
-    - improving the configurability of the environment
-    - collecting a lot more calculated metrics of the environment
-    - making the dispatch engine more modular so different dispatch rules could be injected
-    - replacing the interactive UI with the ability to run many experiments and the ability to view the results of those experiments
-    - ability to apply the simulation to different potential markets
+For a production deployment I would focus on:
 
-If the goal is to scale the Fleet Radar application in a production environment for the actual Vay fleet, I would focus on a different set of objectives:
+- Durable event ingestion and replay using Kafka or equivalent. Fleet Radar should derive its state from versioned vehicle/route events and be capable of reconstructing data stores via replay. Durable, resilient data stores ensure that derived information is trustworthy and engineering can focus on value added work.
+- Establish a versioned data model and canonical data dictionary across vehicle, fleet, customer and operational systems. Clear semantics, provenance and data ownership ensure that multiple business and engineering teams are speaking the same language.
+- Storage based on access patterns. Keep current operational state in a low-latency store while moving historical telemetry into analytical/time-series storage as requirements emerge. Introduce geospatial indexing for proximity and coverage queries.
+- Operational reliability and observability. Add comprehensive logging, metrics, monitoring and alerting to the system. Engineers should be aware of issues as they arise and respond quickly. Operators should be able to distinguish real fleet problems with data availability issues.
+- Continuous integration and deployment. Applications should be testable and able to be deployed quickly, reliably and independently. Prefer idempotent services where appropriate so that the application layer is resilient.
+- Independent dispatch/optimization. Treat dispatch as a consumer of fleet state that produces commands. Keep this modular so simple rules can evolve into optimization systems and new policies can be shadow tested against production data.
+- Optimize the Fleet UI for learning before polish. The underlying event architecture, data model and operational APIs have predictable technical requirements and are worth investing in early. The operator UI does not, its requirements emerge from observing real workflows. I would initially favor rapidly changeable prototypes—even if somewhat rough—while building a solid data and API layer underneath them. Once the valuable workflows are understood a production UI can be built on top of a solid foundation.
 
-    - a cloud services architecture for high throughput and reliability. (i.e. Kafka, Firehose, BigQuery, various cloud databases and services)
-    - minimize the surface area where we deploy any custom code to places where we actually provide meaningful differentiation
-    - defining a canonical data dictionary across all services and appoint sponsors and owners for various areas
-    - defining the types of databases which are optimized for different use cases (i.e BigQuery for data lake, TimescaleDB for windowed aggregations, PostGIS for geospatial indexes, DataDog for operational monitoring and alerting)
-    - the dispatch engine would be rebuilt to be highly modular so that we could easily stream data, experiment with new rulesets, and manually override automated dispatch decisions.
-    - a clean REST or GraphQL interface to retrieve data across internal systems
-    - I would investigate potential platforms for the fleet UI, maybe composing it from various no code options so that we could iterate quickly with fleet operators before we commit to building a full fledged react interface. It is more important to first discover what is useful before we spend time writing code.
+The simulation environment has a different scaling objective. Rather than processing more live vehicles, I would make it useful for running repeatable experiments: realistic historical demand/traffic, configurable operational constraints, interchangeable dispatch policies, richer metrics and the ability to run many simulations across different service areas.
 
 ## Appendix: Simulation Configuration
 
