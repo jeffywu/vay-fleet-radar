@@ -16,15 +16,18 @@ export function registerEventStream(app: FastifyInstance, hub: ProjectionStreamH
     if (requested !== undefined && (!cursorPattern.test(requested) || BigInt(requested) > 9_223_372_036_854_775_807n)) {
       throw new ApiError(400, "INVALID_CURSOR", "Event cursor is invalid");
     }
-    const cursor = requested ?? await updates.currentCursor(app.pgPool);
+    const current = await updates.currentCursor(app.pgPool);
+    const cursor = requested ?? current;
     const oldest = await updates.oldestCursor(app.pgPool);
-    const reset = oldest !== undefined && BigInt(cursor) < BigInt(oldest) - 1n;
+    const cursorAhead = BigInt(cursor) > BigInt(current);
+    const reset = cursorAhead || (oldest !== undefined && BigInt(cursor) < BigInt(oldest) - 1n);
 
     reply.hijack();
     reply.raw.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive", "X-Accel-Buffering": "no" });
     if (reset) {
-      reply.raw.end(`event: stream.reset-required\ndata: {"reason":"cursor-pruned"}\n\n`);
+      const reason = cursorAhead ? "cursor-ahead" : "cursor-pruned";
+      reply.raw.end(`event: stream.reset-required\ndata: {"reason":"${reason}"}\n\n`);
       return;
     }
     let closed = false;

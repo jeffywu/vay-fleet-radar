@@ -91,6 +91,50 @@ suite("server-owned map feed startup", () => {
       await runtime.close();
     }
   }, 15_000);
+
+  it("starts a clean simulation after an application restart", async () => {
+    const planRoute = vi.fn(async (origin: readonly [number, number], destination: { coordinate: readonly [number, number] }) => ({
+      geometry: { type: "LineString" as const, coordinates: [origin, destination.coordinate] },
+      distanceMeters: 1, durationSeconds: 3_600,
+    }));
+    const testRouting: RoutingPort = { planRoute };
+    const first = await createServerRuntime({ world, simulationConfig, serverConfig, routing: testRouting });
+    let second: Awaited<ReturnType<typeof createServerRuntime>> | undefined;
+    try {
+      await first.engine.advance(1);
+      const vehicle = first.engine.snapshots()[0]!;
+      await expect(first.dispatch.assignOne([{ id: vehicle.id, coordinate: vehicle.coordinate,
+        batteryPercentage: vehicle.batteryPercentage, status: "FREE" }], world)).resolves.toMatchObject({ accepted: true });
+      const populated = await pool.query(
+        "SELECT (SELECT count(*) FROM event_log)::int AS events,(SELECT count(*) FROM vehicle_current)::int AS vehicles," +
+        "(SELECT count(*) FROM dispatch_job)::int AS jobs,(SELECT count(*) FROM route_current)::int AS routes," +
+        "(SELECT COALESCE(MAX(stream_id),0)::text FROM projection_update) AS cursor",
+      );
+      expect(populated.rows[0]).toMatchObject({ jobs: 1, routes: 1, vehicles: simulationConfig.vehicleCount });
+      expect(populated.rows[0].events).toBeGreaterThan(0);
+      await first.close();
+
+      second = await createServerRuntime({ world, simulationConfig, serverConfig, routing: testRouting });
+      const cleared = await pool.query(
+        "SELECT (SELECT count(*) FROM event_log)::int AS events,(SELECT count(*) FROM projection_update)::int AS updates," +
+        "(SELECT count(*) FROM vehicle_current)::int AS vehicles,(SELECT count(*) FROM dispatch_job)::int AS jobs," +
+        "(SELECT count(*) FROM route_current)::int AS routes,(SELECT count(*) FROM vehicle_projection_cursor)::int AS cursors",
+      );
+      expect(cleared.rows[0]).toEqual({ events: 0, updates: 0, vehicles: 0, jobs: 0, routes: 0, cursors: 0 });
+      expect(second.engine.snapshots()).toHaveLength(simulationConfig.vehicleCount);
+      expect(second.engine.snapshots().every(({ status }) => status === "FREE")).toBe(true);
+      expect(second.routes.listDispatchRoutes()).toEqual([]);
+      expect(planRoute).toHaveBeenCalledTimes(1);
+      await second.engine.advance(1);
+      const nextCursor = (await pool.query<{ cursor: string }>(
+        "SELECT COALESCE(MAX(stream_id),0)::text AS cursor FROM projection_update",
+      )).rows[0]!.cursor;
+      expect(BigInt(nextCursor)).toBeGreaterThan(BigInt(populated.rows[0].cursor));
+    } finally {
+      await first.close();
+      await second?.close();
+    }
+  }, 15_000);
 });
 
 type FleetRecord = { vehicleId: string; coordinate: [number, number]; heading: number; batteryPercentage: number;

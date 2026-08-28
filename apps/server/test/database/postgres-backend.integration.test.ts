@@ -69,6 +69,18 @@ suite("Postgres backend", () => {
     expect(await new SequenceRepository().maximumByVehicle(pool)).toEqual(new Map([["vehicle-0001", 3]]));
   });
 
+  it("clears an active route when its assignment is rejected", async () => {
+    await consumer.consume(telemetry("telemetry", 1, [-115.17, 36.12], 73));
+    await consumer.consume(event("requested", "dispatch.assignment-requested", 2, { dispatchJobId: "job-1", commandId: "command-1",
+      routeId: "route-1", routeVersion: 1, destinationId: "destination-0001", strategy: "random" }, "job-1"));
+    await consumer.consume(event("assigned", "route.assigned", 3,
+      { routeId: "route-1", version: 1, destinationId: "destination-0001", assignmentState: "ACCEPTED" }, "job-1"));
+    await consumer.consume(event("rejected", "route.assignment-rejected", 4,
+      { routeId: "route-1", version: 1, destinationId: "destination-0001", reason: "ROUTING_UNAVAILABLE" }, "job-1"));
+    expect((await pool.query("SELECT count(*)::int AS count FROM route_current")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT state FROM dispatch_job WHERE dispatch_job_id='job-1'")).rows[0].state).toBe("REJECTED");
+  });
+
   it("enforces one active dispatch job per vehicle and rolls back the conflicting event", async () => {
     await consumer.consume(event("requested-1", "dispatch.assignment-requested", 1, { dispatchJobId: "job-1", commandId: "command-1",
       routeId: "route-1", routeVersion: 1, destinationId: "destination-0001", strategy: "random" }, "job-1"));

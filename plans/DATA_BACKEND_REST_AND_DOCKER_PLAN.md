@@ -73,16 +73,9 @@ Before backend implementation, update `plans/ARCHITECTURE.md` with the decisions
 
 ### Event-sequence restart semantics
 
-The current architecture describes `sequence` as monotonic only within a simulator run. That is insufficient once Postgres survives application restarts: a new run starting at sequence `1` would be permanently older than the stored projection.
+The local demo treats every application boot as a new simulation run. Startup clears the previous event log and projections before producers start, so the shared `FleetEventFactory` begins each vehicle sequence at one and remains monotonic within that run. The Postgres schema, migration history, and database-owned sequence counters remain in the named volume. In particular, the SSE stream counter is not reused across ordinary application restarts, which lets an already-open browser detect the new stream and reload its snapshot safely.
 
-For the local MVP, preserve a single monotonic sequence domain across restarts:
-
-1. Before starting simulation or dispatch producers, read the maximum accepted sequence for every vehicle from Postgres.
-2. Seed the shared `FleetEventFactory` with those values.
-3. Allocate each later sequence synchronously from that shared factory.
-4. Start event producers only after sequence hydration and consumer subscription complete.
-
-Add the initialization capability to the sequence factory without adding database dependencies to `packages/domain`. A real external event source is responsible for its own durable partition/sequence semantics. Multiple producer processes require a different allocator and remain future work.
+A production system would not clear the operational event log at startup. It would introduce explicit run identities or hydrate a durable producer sequence allocator before supporting resume semantics. A real external event source remains responsible for its own partition and sequence behavior.
 
 ### Exact event validation
 
@@ -507,7 +500,7 @@ Treat notifications as hints only; their payload is just the newest stream ID. T
 1. Parse and validate environment/server configuration.
 2. Create the Postgres pool and verify connectivity.
 3. Load and validate `WorldCatalog`.
-4. Load the last per-vehicle event sequences.
+4. Truncate the previous run's event, projection, dispatch-job, route, cursor, and SSE rows without resetting database sequence counters.
 5. Create the shared seeded `FleetEventFactory`.
 6. Create the in-memory event bus.
 7. Create and subscribe `PostgresFleetEventConsumer`.
@@ -583,7 +576,7 @@ app
 
 `depends_on` conditions express ordering, but the application must still retry initial database connectivity for a short bounded window because container ordering is not a network guarantee.
 
-Persist Postgres in a named volume. Normal `docker compose down` preserves it; document `docker compose down --volumes` as the explicit destructive reset operation.
+Persist Postgres in a named volume so schema, migration history, and database sequence counters survive. Normal application boot deliberately clears runtime simulation rows; `docker compose down --volumes` remains the explicit way to remove the database itself.
 
 ### Compose environment
 
@@ -758,16 +751,16 @@ Keep Docker/Postgres tests outside the fastest unit-test loop if necessary, but 
 - Valid events are appended and projected atomically in Postgres.
 - Duplicate event IDs are harmless, and stale sequences/versions cannot regress or resurrect projections.
 - Backend `receivedAt` drives freshness and remains stable during replay.
-- Application restart continues per-vehicle event sequences above stored maxima.
+- Application restart clears the previous run before producers start; per-vehicle sequences restart at one within the new run.
 - Current vehicles, routes, and dispatch jobs can be rebuilt from `event_log`.
 - No unknown route payload fields or Directions geometry/metrics can enter the event log or schema.
 - `/api/vehicles` returns a consistent snapshot and matching resumable stream cursor.
 - Vehicle detail joins ephemeral geometry only from memory and reports its absence explicitly.
 - `/api/dispatch-jobs`, `/api/events`, and `/health` satisfy the documented contracts.
-- SSE emits only committed projection replacements, resumes without gaps inside retention, and requests a snapshot reset outside retention.
+- SSE emits only committed projection replacements, resumes without gaps inside retention, and requests a snapshot reset for pruned or invalidated cursors.
 - API input is validated, SQL is parameterized, and errors/logs reveal no credentials or provider data.
 - One Docker Compose command runs migrations, Postgres, the backend/simulator/dispatch runtime, and the React application locally.
-- Postgres data survives an application-container restart, and producer sequences continue correctly.
+- Postgres schema and migration history survive an application-container restart, while runtime event/projection/job data starts clean.
 - Missing Mapbox tokens produce the existing browser setup/routing-degraded behavior without making Postgres or REST unavailable.
 - Default unit tests make no live Mapbox calls.
 - Unit, Postgres integration, API/SSE integration, production build, Docker smoke, and `git diff --check` all pass.

@@ -157,7 +157,7 @@ The simulation runtime owns an in-memory `ActiveRouteStore` keyed by the applica
 - It supplies geometry to the simulator and browser.
 - It is removed promptly when movement ends.
 - It is excluded from database backups, event payloads, logs, and debug dumps.
-- On process restart, active route geometry may be requested again from persisted origin/destination facts.
+- On application boot, the local MVP clears the previous simulation run and starts with an empty active-route store; it does not spend Directions requests reacquiring old work.
 
 Persisted `route_current` contains only application-owned facts: route ID, vehicle ID, origin coordinate or destination ID, destination ID, version, lifecycle state, and timestamps. Mapbox geometry, distance, duration, and raw responses are not persisted.
 
@@ -190,7 +190,7 @@ Failure behavior is explicit:
 - `NoRoute` or `NoSegment`: choose another destination on a later bounded attempt; otherwise leave the vehicle `FREE`.
 - Timeout, provider 5xx, or rate limit: apply short backoff and reduce new route starts; do not invent straight-line movement.
 - Invalid token or exhausted application budget: stop starting new movements, surface a degraded-system indicator, and allow active routes to finish.
-- Missing active geometry after restart: request it again from persisted endpoints before resuming movement.
+- Missing active geometry during a run: reject or cancel the affected movement and allow normal dispatch to replace it; application restart begins a clean run.
 
 ## Mapbox Usage Inventory
 

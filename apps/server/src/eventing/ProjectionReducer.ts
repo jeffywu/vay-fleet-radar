@@ -110,8 +110,15 @@ export class ProjectionReducer {
         return changes;
       }
       case "route.assignment-rejected": {
+        const removed = await client.query<{ route_id: string }>(
+          "DELETE FROM route_current WHERE vehicle_id=$1 AND route_id=$2 AND version <= $3 RETURNING route_id",
+          [event.vehicleId, event.payload.routeId, event.payload.version],
+        );
+        const changes: Change[] = removed.rows[0] ? [{ type: "route.removed", id: event.vehicleId,
+          payload: { vehicleId: event.vehicleId, routeId: removed.rows[0].route_id } }] : [];
         const job = await advanceJob(client, event.correlationId, "REJECTED", receivedAt, event.payload.reason);
-        return job ? [{ type: "dispatch-job.updated", id: job, payload: await dispatchPayload(client, job) }] : [];
+        if (job) changes.push({ type: "dispatch-job.updated", id: job, payload: await dispatchPayload(client, job) });
+        return changes;
       }
       case "dispatch.assignment-completed": {
         const job = await advanceJob(client, event.payload.dispatchJobId, "COMPLETED", receivedAt);

@@ -10,7 +10,7 @@ import { seededRandom } from "@fleet-radar/world";
 import { createApiServer } from "./api/createApiServer.ts";
 import { loadServerConfig, type ServerConfig } from "./config/loadServerConfig.ts";
 import { createDatabasePool, verifyDatabase } from "./database/pool.ts";
-import { SequenceRepository } from "./database/SequenceRepository.ts";
+import { resetSimulationState } from "./database/resetSimulationState.ts";
 import { DispatchJobRepository } from "./database/DispatchJobRepository.ts";
 import { FleetReadRepository } from "./database/FleetReadRepository.ts";
 import { DispatchRunner } from "./dispatch/DispatchRunner.ts";
@@ -38,11 +38,12 @@ export async function createServerRuntime(options: CreateServerRuntimeOptions = 
         } });
       }),
     ]);
+    await resetSimulationState(pool);
     const factory = new SequencedFleetEventFactory();
-    factory.initializeSequences(await new SequenceRepository().maximumByVehicle(pool));
     const bus = new InMemoryEventBus();
     const consumer = new PostgresFleetEventConsumer(bus, pool, new ProjectionReducer(world));
     await consumer.start();
+    const dispatchJobs = new DispatchJobRepository(pool);
     const routes = new ActiveRouteStore();
     const token = options.directionsToken ?? process.env.MAPBOX_DIRECTIONS_ACCESS_TOKEN ?? process.env.MAPBOX_TOKEN ?? "";
     const routing = options.routing ?? (token ? new MapboxDirectionsRouter(token, simulationConfig.routing) : new UnavailableRouter());
@@ -54,7 +55,7 @@ export async function createServerRuntime(options: CreateServerRuntimeOptions = 
     const routingState = () => routing instanceof UnavailableRouter ||
       (routing instanceof MapboxDirectionsRouter && routing.metrics().remainingBudget <= 0) ? "degraded" as const : "ready" as const;
     const dispatchRunner = new DispatchRunner(dispatch, new FleetReadRepository(pool, serverConfig.staleAfterSeconds),
-      new DispatchJobRepository(pool), world, serverConfig.dispatchTargetActive, serverConfig.dispatchIntervalMs,
+      dispatchJobs, world, serverConfig.dispatchTargetActive, serverConfig.dispatchIntervalMs,
       serverConfig.dispatchMaxPerCycle, () => routingState() === "ready");
     const { app, hub } = await createApiServer({ pool, config: serverConfig, routes,
       health: { database: async () => { await pool.query("SELECT 1"); return true; }, consumer: () => consumer.status(), routing: routingState },

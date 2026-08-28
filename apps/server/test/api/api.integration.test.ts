@@ -74,4 +74,11 @@ suite("backend API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("event: stream.reset-required");
   });
+
+  it("requests a snapshot reset when an SSE cursor is from a later stream generation", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/events?after=42" });
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("event: stream.reset-required");
+    expect(response.body).toContain('"reason":"cursor-ahead"');
+  });
 });

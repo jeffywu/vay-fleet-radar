@@ -403,7 +403,7 @@ Required behavior:
 - Never serialize it to database, event log, ordinary logs, snapshots, or generated assets.
 - Allow the API layer to join active `EN_ROUTE` geometry into an in-memory response.
 
-Process restart loses active geometry by design. Resume behavior is future work until durable dispatch facts and startup reconciliation exist; the MVP starts a fresh deterministic simulation run.
+Process restart loses active geometry by design. For the local MVP, every application boot also clears the previous run's event log, projections, dispatch jobs, and projection stream before producers start. Schema and migration history remain durable, but runtime simulation state is intentionally not recovered. A production extension should introduce explicit simulation-run identities and a deliberate resume-versus-new-run policy before adding route reacquisition.
 
 ## Mapbox Directions Adapter
 

@@ -131,8 +131,8 @@ Route geometry is not repeated in telemetry events or persisted route events. Un
 - Heading is degrees in the range `[0, 360)`, where `0` is north.
 - Battery percentage is in the range `[0, 100]`.
 - Event timestamps are ISO 8601 UTC timestamps.
-- `sequence` is monotonically increasing per vehicle across local application restarts.
-- The composition root shares one `FleetEventFactory` across simulator and dispatch publishers so their events use one per-vehicle sequence domain. Before either producer starts, it reads each vehicle's maximum accepted sequence from Postgres and hydrates the factory; consumer subscription also completes before producers start. The sequence is not a database version or Kafka offset.
+- `sequence` is monotonically increasing per vehicle within one simulation run and starts again from one when a clean run boots.
+- The composition root shares one `FleetEventFactory` across simulator and dispatch publishers so their events use one per-vehicle sequence domain. Consumer subscription completes before producers start. The sequence is not a database version or Kafka offset.
 - A real external source owns its durable partition and sequence semantics. Multiple producer processes would require a different durable allocator and remain future work.
 - `routeId` identifies a route assignment; `version` increases on route updates.
 - Staleness is based on backend `receivedAt`, not producer clock time.
@@ -208,7 +208,7 @@ type PlannedRoute = {
 
 The MVP adapter calls Mapbox Directions with the `mapbox/driving` profile, `geometries=geojson`, and an appropriate overview. `PlannedRoute` is simulation-owned active working state, not command or durable data. The simulator installs it in an in-memory `ActiveRouteStore` after accepting a movement and the API may expose active dispatch geometry to the browser. It is removed when the route completes or is cancelled.
 
-Persisted route events and `route_current` keep only application-owned facts such as route ID, vehicle ID, origin coordinate or destination ID, destination ID, version, lifecycle state, and timestamps. They do not store Mapbox geometry, distance, duration, or the raw provider response. If active geometry is missing after a process restart, the adapter requests a new ephemeral route from the persisted endpoints.
+Persisted route events and `route_current` keep only application-owned facts such as route ID, vehicle ID, origin coordinate or destination ID, destination ID, version, lifecycle state, and timestamps. They do not store Mapbox geometry, distance, duration, or the raw provider response. This local MVP deliberately starts a new simulation run on every application boot: after migrations and configuration validation, startup truncates the event log, projection stream, vehicle and route projections, dispatch jobs, and projection cursors before any producer starts. Database schema, migration history, and database-owned sequence counters remain in the Docker volume, while the in-memory active-route store starts empty. Keeping the opaque SSE counter monotonic prevents cursor reuse across ordinary restarts; a cursor ahead of the available stream forces the browser to reload its snapshot. A production operational system would retain history and use explicit run identities and recovery instead of destructive startup reset.
 
 Directions is called once per attempted trip or dispatch assignment, never once per telemetry tick. The adapter enforces a concurrency limit, a request timeout, bounded retries, the provider's rate limit, and an application-level monthly request budget. Accelerating simulated movement must not accelerate trip turnover past that request budget. Tests use a deterministic fake `RoutingPort`, not live Mapbox requests.
 
@@ -295,7 +295,7 @@ SSE messages come from committed `projection_update` records, include a resumabl
 
 Browser replacements are flushed to React at most once per animation frame and stale state is recalculated once per second from backend receipt time. One Mapbox GeoJSON source and two layers render all vehicle locations, status colors, stale treatment, and headings. This avoids one DOM marker or one source update per telemetry event and remains suitable for the expected increase from approximately 100 to 1,000 vehicles.
 
-The API joins route geometry only from the simulation-owned `ActiveRouteReader` in process memory. No REST or SSE repository reads geometry from Postgres, and missing geometry after a restart is an expected transient state until routing reacquires it.
+The API joins route geometry only from the simulation-owned `ActiveRouteReader` in process memory. No REST or SSE repository reads geometry from Postgres. Because each local application boot begins a clean simulation run, no previous active route is recovered and the HTTP server and dispatch scheduler start with an empty route store.
 
 There are no public mutation endpoints in the MVP.
 
